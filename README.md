@@ -1,4 +1,4 @@
-<img width="819" height="380" alt="DarkSoundMixer-preview" src="https://github.com/user-attachments/assets/528fab08-231a-42f0-b64d-bffffac9721a" />
+<img width="809" height="370" alt="DarkSoundMixer-preview" src="https://github.com/user-attachments/assets/528fab08-231a-42f0-b64d-bffffac9721a" />
 
 DarkSoundMixer
 
