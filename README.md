@@ -1,3 +1,5 @@
+<img width="819" height="380" alt="DarkSoundMixer-preview" src="https://github.com/user-attachments/assets/528fab08-231a-42f0-b64d-bffffac9721a" />
+
 DarkSoundMixer
 
 A high-performance Windows audio mixer designed for individual application volume control.
