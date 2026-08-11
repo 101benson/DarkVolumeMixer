@@ -1,2 +1,0 @@
-C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\bin\Release\net10.0-windows\win-x64\publish\DarkVolumeMixer.pdb
-C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\bin\Release\net10.0-windows\win-x64\publish\DarkVolumeMixer.exe
