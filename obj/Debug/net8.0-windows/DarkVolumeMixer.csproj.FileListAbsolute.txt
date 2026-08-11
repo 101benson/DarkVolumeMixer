@@ -1,0 +1,10 @@
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\DarkVolumeMixer.csproj.AssemblyReference.cache
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\MainWindow.baml
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\MainWindow.g.cs
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\App.g.cs
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\DarkVolumeMixer_MarkupCompile.cache
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\DarkVolumeMixer.g.resources
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\DarkVolumeMixer.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\DarkVolumeMixer.AssemblyInfoInputs.cache
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\DarkVolumeMixer.AssemblyInfo.cs
+C:\Users\PC-PAPA\SoundMixer\DarkVolumeMixer\obj\Debug\net8.0-windows\DarkVolumeMixer.csproj.CoreCompileInputs.cache
