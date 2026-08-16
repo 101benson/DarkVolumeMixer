@@ -8,16 +8,10 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>app.ico</ApplicationIcon>
-
-    <!-- Single-File & Self-Contained Konfiguration -->
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>true</SelfContained>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Bindet das Icon fest in die .exe ein (wichtig für pack://application:,,,/app.ico) -->
+    <!-- Bindet das Icon fest als interne Resource ein -->
     <Resource Include="app.ico" />
   </ItemGroup>
 
