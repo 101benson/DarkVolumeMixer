@@ -278,7 +278,6 @@
         </Style>
     </Window.Resources>
 
-
     <Border Background="#0E0E10" BorderBrush="#28282E" BorderThickness="1" CornerRadius="10" Padding="10,8,10,10"
             MouseDown="Window_MouseDown">
         <Grid>
@@ -287,6 +286,7 @@
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
+            <!-- Titelleiste -->
             <Grid Grid.Row="0" Margin="0,0,0,12" Background="Transparent">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -312,7 +312,6 @@
                 </Grid>
 
                 <StackPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Orientation="Horizontal">
-                    
                     <!-- Discord Limiter ToggleButton -->
                     <ToggleButton Width="28" Height="28" Margin="0,0,2,0" Cursor="Hand" ToolTip="Discord Limiter"
                                   IsChecked="{Binding IsDiscordLimiterActive, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=Window}}">
@@ -405,69 +404,67 @@
                 </Grid.ColumnDefinitions>
 
                 <!-- Master Regler (Links) -->
-<Border Grid.Column="0" Background="#161619" BorderBrush="#FF9500" BorderThickness="1" 
-        CornerRadius="6" Margin="0,0,12,0" Padding="12" Width="110" 
-        VerticalAlignment="Stretch"
-        PreviewMouseWheel="MasterSlider_PreviewMouseWheel">
-    <Grid>
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
+                <Border Grid.Column="0" Background="#161619" BorderBrush="#FF9500" BorderThickness="1" 
+                        CornerRadius="6" Margin="0,0,12,0" Padding="12" Width="110" 
+                        VerticalAlignment="Stretch"
+                        PreviewMouseWheel="MasterSlider_PreviewMouseWheel">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
 
-        <Path Grid.Row="0" Data="M3,9 V15 H7 L12,20 V4 L7,9 H3 Z M16.5,12 C16.5,10.23 15.48,8.71 14,7.97 V16.02 C15.48,15.29 16.5,13.77 16.5,12 Z" 
-              Fill="#FF9500" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center" Margin="0,0,0,4"/>
+                        <Path Grid.Row="0" Data="M3,9 V15 H7 L12,20 V4 L7,9 H3 Z M16.5,12 C16.5,10.23 15.48,8.71 14,7.97 V16.02 C15.48,15.29 16.5,13.77 16.5,12 Z M14,3.23 V5.29 C16.89,6.15 19,8.83 19,12 C19,15.17 16.89,17.85 14,18.71 V20.77 C18.01,19.86 21,16.28 21,12 C21,7.72 18.01,4.14 14,3.23 Z" 
+                              Fill="#FF9500" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center" Margin="0,0,0,4"/>
 
-        <TextBlock Grid.Row="1" Text="MASTER" FontWeight="Bold" Foreground="#FF9500" FontSize="11" TextAlignment="Center"/>
-        <TextBlock Grid.Row="2" Text="{Binding MasterVolume, StringFormat={}{0:0}%}" 
-                   Foreground="#DDDDDD" FontSize="12" FontWeight="SemiBold" TextAlignment="Center" Margin="0,2,0,6"/>
+                        <TextBlock Grid.Row="1" Text="MASTER" FontWeight="Bold" Foreground="#FF9500" FontSize="11" TextAlignment="Center"/>
+                        <TextBlock Grid.Row="2" Text="{Binding MasterVolume, StringFormat={}{0:0}%}" 
+                                   Foreground="#DDDDDD" FontSize="12" FontWeight="SemiBold" TextAlignment="Center" Margin="0,2,0,6"/>
 
-        <ComboBox Grid.Row="3" 
-               Style="{StaticResource DarkComboBoxStyle}"
-               ItemsSource="{Binding Devices, RelativeSource={RelativeSource AncestorType=Window}}"
-               SelectedItem="{Binding SelectedDevice, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=Window}}"
-               DisplayMemberPath="FriendlyName"
-               Height="22" Margin="0,0,0,8" VerticalContentAlignment="Center"/>
+                        <ComboBox Grid.Row="3" 
+                               Style="{StaticResource DarkComboBoxStyle}"
+                               ItemsSource="{Binding Devices, RelativeSource={RelativeSource AncestorType=Window}}"
+                               SelectedItem="{Binding SelectedDevice, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=Window}}"
+                               DisplayMemberPath="FriendlyName"
+                               Height="22" Margin="0,0,0,8" VerticalContentAlignment="Center"/>
 
-        <!-- Hier wird NUR der Slider an IsMasterEnabled gebunden, das Kästchen/Border bleibt voll bedienbar! -->
-        <Grid Grid.Row="4" Margin="0,2">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="6"/>
-            </Grid.ColumnDefinitions>
+                        <Grid Grid.Row="4" Margin="0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="6"/>
+                            </Grid.ColumnDefinitions>
 
-            <Slider Grid.Column="0" Style="{StaticResource MasterSliderStyle}" Orientation="Vertical" Minimum="0" Maximum="100" 
-                    Value="{Binding MasterVolume, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=Window}}" 
-                    IsEnabled="{Binding IsMasterEnabled}"
-                    HorizontalAlignment="Center"
-                    PreviewMouseLeftButtonDown="Slider_PreviewMouseLeftButtonDown"
-                    PreviewMouseLeftButtonUp="Slider_PreviewMouseLeftButtonUp"/>
+                            <Slider Grid.Column="0" Style="{StaticResource MasterSliderStyle}" Orientation="Vertical" Minimum="0" Maximum="100" 
+                                    Value="{Binding MasterVolume, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=Window}}" 
+                                    IsEnabled="{Binding IsMasterEnabled}"
+                                    HorizontalAlignment="Center"
+                                    PreviewMouseLeftButtonDown="Slider_PreviewMouseLeftButtonDown"
+                                    PreviewMouseLeftButtonUp="Slider_PreviewMouseLeftButtonUp"/>
 
-            <ProgressBar Grid.Column="1" Orientation="Vertical" Minimum="0" Maximum="100" 
-                         Value="{Binding MasterPeak, RelativeSource={RelativeSource AncestorType=Window}}" 
-                         Foreground="#FF9500" Background="#1A1A1D" BorderThickness="0"/>
-        </Grid>
+                            <ProgressBar Grid.Column="1" Orientation="Vertical" Minimum="0" Maximum="100" 
+                                         Value="{Binding MasterPeak, RelativeSource={RelativeSource AncestorType=Window}}" 
+                                         Foreground="#FF9500" Background="#1A1A1D" BorderThickness="0"/>
+                        </Grid>
 
-        <!-- Der Mute-Button bleibt im Kästchen immer klickbar, auch wenn der Regler gesperrt ist -->
-        <ToggleButton Grid.Row="5" Style="{StaticResource MasterMuteButtonStyle}"
-                      IsChecked="{Binding IsMasterMuted, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=Window}}"
-                      Margin="0,8,0,0" Cursor="Hand"/>
-    </Grid>
-</Border>
-
+                        <ToggleButton Grid.Row="5" Style="{StaticResource MasterMuteButtonStyle}"
+                                      IsChecked="{Binding IsMasterMuted, Mode=TwoWay, RelativeSource={RelativeSource AncestorType=Window}}"
+                                      Margin="0,8,0,0" Cursor="Hand"/>
+                    </Grid>
+                </Border>
 
                 <!-- App-Kacheln (Mitte) -->
-                <ScrollViewer Grid.Column="1" 
-                              HorizontalScrollBarVisibility="Auto" 
-                              VerticalScrollBarVisibility="Disabled"
-                              HorizontalAlignment="Stretch" 
-                              VerticalAlignment="Stretch"
-                              CanContentScroll="False"
-                              Padding="0,0,0,6">                              
+                <ScrollViewer x:Name="AppScrollViewer"
+                            Grid.Column="1" 
+                            HorizontalScrollBarVisibility="Auto" 
+                            VerticalScrollBarVisibility="Disabled"
+                            HorizontalAlignment="Stretch" 
+                            VerticalAlignment="Stretch"
+                            CanContentScroll="False"
+                            Padding="0,0,0,6">                           
 
                     <ScrollViewer.Resources>
                         <Style TargetType="ScrollBar">
@@ -505,34 +502,28 @@
 
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-<Border Width="106" Background="#161619" BorderThickness="1" 
-        CornerRadius="6" Margin="0,0,6,0" Padding="8" 
-        VerticalAlignment="Stretch"
-        PreviewMouseWheel="AppSlider_PreviewMouseWheel"
-        MouseLeftButtonDown="AppCard_MouseLeftButtonDown"
-        MouseMove="AppCard_MouseMove"
-        Drop="AppCard_Drop"
-        AllowDrop="True">
-    
-    <Border.Style>
-        <Style TargetType="Border">
-            <Setter Property="BorderBrush" Value="#252529"/>
-            <Setter Property="Opacity" Value="1.0"/>
-            <Setter Property="IsHitTestVisible" Value="True"/>
-            <Style.Triggers>
-                <!-- Türkise Umrandung, wenn als Favorit angeheftet -->
-                <DataTrigger Binding="{Binding IsPinned}" Value="True">
-                    <Setter Property="BorderBrush" Value="#00D294"/>
-                    <Setter Property="BorderThickness" Value="1.5"/>
-                </DataTrigger>
-                <!-- Ausgegraut, wenn stummgeschaltet -->
-                <DataTrigger Binding="{Binding IsEnabled}" Value="False">
-                    <Setter Property="Opacity" Value="1.0"/>
-                    <!-- IsHitTestVisible wird hier KOMPLETT WEGGELASSEN, damit man alles anklicken kann! -->
-                </DataTrigger>                
-            </Style.Triggers>
-        </Style>
-    </Border.Style>
+                                <Border Width="106" Background="#161619" BorderThickness="1" 
+                                        CornerRadius="6" Margin="0,0,6,0" Padding="8" 
+                                        VerticalAlignment="Stretch"
+                                        PreviewMouseWheel="AppSlider_PreviewMouseWheel"
+                                        MouseLeftButtonDown="AppCard_MouseLeftButtonDown"
+                                        MouseMove="AppCard_MouseMove"
+                                        Drop="AppCard_Drop"
+                                        AllowDrop="True">
+                                    
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="BorderBrush" Value="#252529"/>
+                                            <Setter Property="Opacity" Value="1.0"/>
+                                            <Setter Property="IsHitTestVisible" Value="True"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                                    <Setter Property="BorderBrush" Value="#00D294"/>
+                                                    <Setter Property="BorderThickness" Value="1.5"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
 
                                     <Grid>
                                         <Grid.RowDefinitions>
@@ -543,12 +534,12 @@
                                             <RowDefinition Height="Auto"/>
                                         </Grid.RowDefinitions>
                                         
-<Border Grid.Row="0" Width="20" Height="20" HorizontalAlignment="Center" Margin="0,0,0,6" Cursor="Hand" ToolTip="Klicken zum Anheften als Favorit">
-    <Image Source="{Binding Icon, Mode=OneWay}" Width="20" Height="20" 
-           Stretch="Uniform"
-           RenderOptions.BitmapScalingMode="HighQuality"
-           MouseLeftButtonUp="AppIcon_MouseLeftButtonUp"/>                                                   
-</Border>                                    
+                                        <Border Grid.Row="0" Width="20" Height="20" HorizontalAlignment="Center" Margin="0,0,0,6" Cursor="Hand" ToolTip="Klicken zum Anheften als Favorit">
+                                            <Image Source="{Binding Icon, Mode=OneWay}" Width="20" Height="20" 
+                                                   Stretch="Uniform"
+                                                   RenderOptions.BitmapScalingMode="HighQuality"
+                                                   MouseLeftButtonUp="AppIcon_MouseLeftButtonUp"/>                                                   
+                                        </Border>                                    
 
                                         <TextBlock Grid.Row="1" Text="{Binding Name}" FontWeight="SemiBold" Foreground="#BBBBBB" 
                                                    FontSize="11" TextAlignment="Center" TextTrimming="CharacterEllipsis" 
@@ -563,15 +554,15 @@
                                                 <ColumnDefinition Width="6"/>
                                             </Grid.ColumnDefinitions>
 
-                                        <Slider Grid.Column="0" Orientation="Vertical" Minimum="0" Maximum="100" 
-                                                Value="{Binding Volume, Mode=TwoWay}"
-                                                IsEnabled="{Binding IsNotMuted}"
-                                                HorizontalAlignment="Center" 
-                                                PreviewMouseLeftButtonDown="Slider_PreviewMouseLeftButtonDown"
-                                                PreviewMouseLeftButtonUp="Slider_PreviewMouseLeftButtonUp"/>
+                                            <Slider Grid.Column="0" Orientation="Vertical" Minimum="0" Maximum="100" 
+                                                    Value="{Binding Volume, Mode=TwoWay}"
+                                                    IsEnabled="{Binding IsEnabled}"
+                                                    HorizontalAlignment="Center" 
+                                                    PreviewMouseLeftButtonDown="Slider_PreviewMouseLeftButtonDown"
+                                                    PreviewMouseLeftButtonUp="Slider_PreviewMouseLeftButtonUp"/>
 
                                             <ProgressBar Grid.Column="1" Orientation="Vertical" Minimum="0" Maximum="100" 
-                                                         Value="{Binding PeakValue}" Foreground="#00D294" 
+                                                         Value="{Binding Peak}" Foreground="#00D294" 
                                                          Background="#1A1A1D" BorderThickness="0"/>
                                         </Grid>
 

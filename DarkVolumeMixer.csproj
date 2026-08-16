@@ -9,25 +9,19 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
-    <!-- DIE WICHTIGSTEN SCHLÜSSEL FÜR DIE SINGLE-FILE-EXE -->
+    <!-- Single-File & Self-Contained Konfiguration -->
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="app.ico">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Pack>true</Pack>
-      <IncludeInSingleFile>true</IncludeInSingleFile>
-    </Content>
+    <!-- Bindet das Icon fest in die .exe ein (wichtig für pack://application:,,,/app.ico) -->
+    <Resource Include="app.ico" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Hardcodet.NotifyIcon.Wpf" Version="2.0.1" />
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="System.Management" Version="10.0.10" />
   </ItemGroup>

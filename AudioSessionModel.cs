@@ -1,38 +1,72 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Media;
 using NAudio.CoreAudioApi;
 
 namespace DarkVolumeMixer
 {
-    public class AudioSessionModel : INotifyPropertyChanged
+    public class AudioSessionModel : INotifyPropertyChanged, IDisposable
     {
-        private List<AudioSessionControl> _sessions;
+        private readonly object _sessionLock = new();
+        private readonly List<AudioSessionControl> _sessions = new();
+
+        private string _name = string.Empty;
         private ImageSource? _icon;
-        private string _name;
-        private float _volume;
-        private float _volumeCache;
+        private float _volume = 100f;
         private bool _isMuted;
-        private bool _muteCache;
+        private float _peak;
         private bool _isPinned;
         private bool _isEnabled = true;
-        private float _peakValue;
+        private bool _isDisposed;
 
-        public List<AudioSessionControl> Sessions => _sessions;
+        private long _lastUserInteractionTicks;
+        private int _isApplyingVolume;
+        private float _pendingVolume = -1f;
 
-        public string SessionId => _name;
+        public Action? RequestMasterUnmute { get; set; }
 
-        public ImageSource? Icon
+        public AudioSessionModel(AudioSessionControl initialSession, string name, ImageSource? icon)
         {
-            get => _icon;
-            set { _icon = value; OnPropertyChanged(nameof(Icon)); }
+            _name = name;
+            _icon = icon;
+
+            if (initialSession != null)
+            {
+                _sessions.Add(initialSession);
+
+                try
+                {
+                    var sav = initialSession.SimpleAudioVolume;
+                    if (sav != null)
+                    {
+                        _volume = sav.Volume * 100f;
+                        _isMuted = sav.Mute;
+                        _isEnabled = !_isMuted;
+                    }
+                }
+                catch
+                {
+                    _volume = 100f;
+                    _isMuted = false;
+                    _isEnabled = true;
+                }
+            }
         }
 
         public string Name
         {
             get => _name;
-            set { _name = value; OnPropertyChanged(nameof(Name)); }
+            set => SetField(ref _name, value);
+        }
+
+        public ImageSource? Icon
+        {
+            get => _icon;
+            set => SetField(ref _icon, value);
         }
 
         public float Volume
@@ -41,20 +75,13 @@ namespace DarkVolumeMixer
             set
             {
                 float clamped = Math.Clamp(value, 0f, 100f);
-                if (_volume != clamped)
+                if (Math.Abs(_volume - clamped) > 0.01f)
                 {
                     _volume = clamped;
-                    _volumeCache = clamped;
-                    OnPropertyChanged(nameof(Volume));
-                    OnPropertyChanged(nameof(IsNotMuted));
+                    Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
+                    OnPropertyChanged();
 
-                    foreach (var s in _sessions)
-                    {
-                        if (s.SimpleAudioVolume != null)
-                        {
-                            s.SimpleAudioVolume.Volume = clamped / 100f;
-                        }
-                    }
+                    QueueVolumeApply(clamped / 100f);
                 }
             }
         }
@@ -67,19 +94,12 @@ namespace DarkVolumeMixer
                 if (_isMuted != value)
                 {
                     _isMuted = value;
-                    _muteCache = value;
-                    OnPropertyChanged(nameof(IsMuted));
-                    OnPropertyChanged(nameof(IsNotMuted));
-                    OnPropertyChanged(nameof(IsEnabled));
+                    IsEnabled = !value;
+                    Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
+                    OnPropertyChanged();
+                    QueueMuteApply(value);
 
-                    foreach (var s in _sessions)
-                    {
-                        if (s.SimpleAudioVolume != null)
-                        {
-                            s.SimpleAudioVolume.Mute = value;
-                        }
-                    }
-
+                    // Nur wenn der Nutzer diese App aktiv entmutet, wird der Master mit entmutet
                     if (!value)
                     {
                         RequestMasterUnmute?.Invoke();
@@ -88,155 +108,254 @@ namespace DarkVolumeMixer
             }
         }
 
-        public bool IsNotMuted => !_isMuted;
-
-        private bool _isUpdatingPin = false;
+        public float Peak
+        {
+            get => _peak;
+            set
+            {
+                if (Math.Abs(_peak - value) > 0.3f || (value == 0 && _peak != 0))
+                {
+                    _peak = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
 
         public bool IsPinned
         {
             get => _isPinned;
             set
             {
-                if (_isUpdatingPin) return;
-
                 if (_isPinned != value)
                 {
-                    _isUpdatingPin = true;
-                    try
-                    {
-                        _isPinned = value;
-                        OnPropertyChanged(nameof(IsPinned));
-
-                        // Direkt im Hauptfenster die Anordnung aktualisieren
-                        if (System.Windows.Application.Current.MainWindow is MainWindow mainWindow)
-                        {
-                            mainWindow.ReorderSessionsAfterPin(this);
-                        }
-                    }
-                    finally
-                    {
-                        _isUpdatingPin = false;
-                    }
+                    _isPinned = value;
+                    OnPropertyChanged();
                 }
             }
         }
 
         public bool IsEnabled
         {
-            get => _isEnabled && !_isMuted;
-            set
-            {
-                if (_isEnabled != value)
-                {
-                    _isEnabled = value;
-                    OnPropertyChanged(nameof(IsEnabled));
-                }
-            }
-        }
-
-        public float PeakValue
-        {
-            get => _peakValue;
-            set
-            {
-                if (_peakValue != value)
-                {
-                    _peakValue = value;
-                    OnPropertyChanged(nameof(PeakValue));
-                }
-            }
-        }
-
-        public Action? RequestMasterUnmute { get; set; }
-
-        public AudioSessionModel(AudioSessionControl session, string name, ImageSource? icon)
-        {
-            _sessions = new List<AudioSessionControl> { session };
-            _icon = icon;
-            _name = name;
-
-            if (session.SimpleAudioVolume != null)
-            {
-                _volume = Math.Clamp(session.SimpleAudioVolume.Volume * 100f, 0f, 100f);
-                _volumeCache = _volume;
-
-                _isMuted = session.SimpleAudioVolume.Mute;
-                _muteCache = _isMuted;
-            }
+            get => _isEnabled;
+            set => SetField(ref _isEnabled, value);
         }
 
         public void AddSession(AudioSessionControl session)
         {
-            if (!_sessions.Contains(session))
+            if (session == null || _isDisposed) return;
+
+            lock (_sessionLock)
             {
-                _sessions.Add(session);
-                if (session.SimpleAudioVolume != null)
+                for (int i = 0; i < _sessions.Count; i++)
                 {
-                    session.SimpleAudioVolume.Volume = _volume / 100f;
-                    session.SimpleAudioVolume.Mute = _isMuted;
+                    if (ReferenceEquals(_sessions[i], session)) return;
                 }
+
+                _sessions.Add(session);
+
+                try
+                {
+                    var sav = session.SimpleAudioVolume;
+                    if (sav != null)
+                    {
+                        sav.Volume = _volume / 100f;
+                        sav.Mute = _isMuted;
+                    }
+                }
+                catch { }
             }
         }
 
         public void CheckExternalVolumeChanges()
         {
-            if (_sessions == null || _sessions.Count == 0) return;
-            var primarySession = _sessions[0];
-            if (primarySession?.SimpleAudioVolume == null) return;
+            if (_isDisposed) return;
 
-            float currentVol = primarySession.SimpleAudioVolume.Volume * 100f;
-            if (Math.Abs(_volumeCache - currentVol) > 0.5f)
+            long lastInteraction = Interlocked.Read(ref _lastUserInteractionTicks);
+            if (DateTime.UtcNow.Ticks - lastInteraction < TimeSpan.FromMilliseconds(800).Ticks)
             {
-                _volumeCache = currentVol;
-                _volume = currentVol;
-                OnPropertyChanged(nameof(Volume));
+                return;
             }
 
-            bool currentMute = primarySession.SimpleAudioVolume.Mute;
-            if (_muteCache != currentMute)
+            lock (_sessionLock)
             {
-                _muteCache = currentMute;
-                _isMuted = currentMute;
-                OnPropertyChanged(nameof(IsMuted));
-                OnPropertyChanged(nameof(IsNotMuted));
-                OnPropertyChanged(nameof(IsEnabled));
+                for (int i = _sessions.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        var sav = _sessions[i].SimpleAudioVolume;
+                        if (sav != null)
+                        {
+                            float currentVol = sav.Volume * 100f;
+                            bool currentMute = sav.Mute;
+
+                            if (Math.Abs(_volume - currentVol) > 1.5f)
+                            {
+                                _volume = currentVol;
+                                DispatcherRun(() => OnPropertyChanged(nameof(Volume)));
+                            }
+
+                            if (_isMuted != currentMute)
+                            {
+                                _isMuted = currentMute;
+                                _isEnabled = !currentMute;
+                                DispatcherRun(() =>
+                                {
+                                    OnPropertyChanged(nameof(IsMuted));
+                                    OnPropertyChanged(nameof(IsEnabled));
+                                });
+                            }
+                            return;
+                        }
+                    }
+                    catch
+                    {
+                        _sessions.RemoveAt(i);
+                    }
+                }
             }
         }
 
         public void UpdatePeak()
         {
-            try
+            if (_isDisposed || _isMuted || _volume <= 0.01f)
             {
-                if (_sessions == null || _sessions.Count == 0)
-                {
-                    PeakValue = 0f;
-                    return;
-                }
+                Peak = Math.Max(0f, _peak - 18f);
+                return;
+            }
 
-                float maxPeak = 0f;
-                foreach (var session in _sessions)
+            float maxPeak = 0f;
+
+            lock (_sessionLock)
+            {
+                for (int i = _sessions.Count - 1; i >= 0; i--)
                 {
-                    if (session.AudioMeterInformation != null)
+                    try
                     {
-                        float peak = session.AudioMeterInformation.MasterPeakValue * 100f;
-                        if (peak > maxPeak) maxPeak = peak;
+                        var meter = _sessions[i].AudioMeterInformation;
+                        if (meter != null)
+                        {
+                            float rawVal = meter.MasterPeakValue * 100f;
+                            float scaledPeak = rawVal * (_volume / 100f);
+                            if (scaledPeak > maxPeak) maxPeak = scaledPeak;
+                        }
+                    }
+                    catch
+                    {
+                        _sessions.RemoveAt(i);
                     }
                 }
-
-                PeakValue = Math.Clamp(maxPeak * (_volume / 100f), 0f, 100f);
             }
-            catch
+
+            float target = Math.Min(maxPeak, _volume);
+
+            if (target >= _peak)
+                Peak = target;
+            else
+                Peak = Math.Max(0f, _peak - ((_peak - target) * 0.35f) - 1.5f);
+        }
+
+        private void QueueVolumeApply(float volScalar)
+        {
+            _pendingVolume = volScalar;
+
+            if (Interlocked.Exchange(ref _isApplyingVolume, 1) == 1) return;
+
+            Task.Run(() =>
             {
-                PeakValue = 0f;
+                try
+                {
+                    while (true)
+                    {
+                        float current = _pendingVolume;
+                        if (current < 0) break;
+                        _pendingVolume = -1f;
+
+                        lock (_sessionLock)
+                        {
+                            for (int i = _sessions.Count - 1; i >= 0; i--)
+                            {
+                                try
+                                {
+                                    var sav = _sessions[i].SimpleAudioVolume;
+                                    if (sav != null) sav.Volume = current;
+                                }
+                                catch
+                                {
+                                    _sessions.RemoveAt(i);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+                finally
+                {
+                    Interlocked.Exchange(ref _isApplyingVolume, 0);
+                }
+            });
+        }
+
+        private void QueueMuteApply(bool mute)
+        {
+            Task.Run(() =>
+            {
+                lock (_sessionLock)
+                {
+                    for (int i = _sessions.Count - 1; i >= 0; i--)
+                    {
+                        try
+                        {
+                            var sav = _sessions[i].SimpleAudioVolume;
+                            if (sav != null) sav.Mute = mute;
+                        }
+                        catch
+                        {
+                            _sessions.RemoveAt(i);
+                        }
+                    }
+                }
+            });
+        }
+
+        private static void DispatcherRun(Action action)
+        {
+            var app = System.Windows.Application.Current;
+            if (app?.Dispatcher != null && !app.Dispatcher.CheckAccess())
+            {
+                app.Dispatcher.BeginInvoke(action);
+            }
+            else
+            {
+                action();
             }
         }
 
         public void Dispose()
         {
-            _sessions.Clear();
+            if (_isDisposed) return;
+            _isDisposed = true;
+
+            lock (_sessionLock)
+            {
+                _sessions.Clear();
+            }
+
+            RequestMasterUnmute = null;
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
-        protected void OnPropertyChanged(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+        protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        {
+            DispatcherRun(() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName)));
+        }
+
+        protected bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
+        {
+            if (EqualityComparer<T>.Default.Equals(field, value)) return false;
+            field = value;
+            OnPropertyChanged(propertyName);
+            return true;
+        }
     }
 }
