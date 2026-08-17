@@ -24,8 +24,8 @@ namespace DarkVolumeMixer
         private bool _isDisposed;
 
         private long _lastUserInteractionTicks;
-        private int _isApplyingVolume;
-        private float _pendingVolume = -1f;
+        private float _targetHardwareVolume = -1f;
+        private bool _isApplyingLoopRunning;
 
         public Action? RequestMasterUnmute { get; set; }
 
@@ -75,11 +75,21 @@ namespace DarkVolumeMixer
             set
             {
                 float clamped = Math.Clamp(value, 0f, 100f);
-                if (Math.Abs(_volume - clamped) > 0.01f)
+                if (Math.Abs(_volume - clamped) > 0.05f)
                 {
                     _volume = clamped;
                     Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
                     OnPropertyChanged();
+
+                    if (_volume > 0 && _isMuted)
+                    {
+                        IsMuted = false;
+                    }
+
+                    if (_volume > 0)
+                    {
+                        RequestMasterUnmute?.Invoke();
+                    }
 
                     QueueVolumeApply(clamped / 100f);
                 }
@@ -99,7 +109,6 @@ namespace DarkVolumeMixer
                     OnPropertyChanged();
                     QueueMuteApply(value);
 
-                    // Nur wenn der Nutzer diese App aktiv entmutet, wird der Master mit entmutet
                     if (!value)
                     {
                         RequestMasterUnmute?.Invoke();
@@ -113,7 +122,7 @@ namespace DarkVolumeMixer
             get => _peak;
             set
             {
-                if (Math.Abs(_peak - value) > 0.3f || (value == 0 && _peak != 0))
+                if (Math.Abs(_peak - value) > 0.5f || (value == 0 && _peak != 0))
                 {
                     _peak = value;
                     OnPropertyChanged();
@@ -188,21 +197,17 @@ namespace DarkVolumeMixer
                             float currentVol = sav.Volume * 100f;
                             bool currentMute = sav.Mute;
 
-                            if (Math.Abs(_volume - currentVol) > 1.5f)
+                            if (Math.Abs(_volume - currentVol) > 2.0f)
                             {
                                 _volume = currentVol;
-                                DispatcherRun(() => OnPropertyChanged(nameof(Volume)));
+                                OnPropertyChanged(nameof(Volume));
                             }
 
                             if (_isMuted != currentMute)
                             {
                                 _isMuted = currentMute;
-                                _isEnabled = !currentMute;
-                                DispatcherRun(() =>
-                                {
-                                    OnPropertyChanged(nameof(IsMuted));
-                                    OnPropertyChanged(nameof(IsEnabled));
-                                });
+                                IsEnabled = !currentMute;
+                                OnPropertyChanged(nameof(IsMuted));
                             }
                             return;
                         }
@@ -219,7 +224,7 @@ namespace DarkVolumeMixer
         {
             if (_isDisposed || _isMuted || _volume <= 0.01f)
             {
-                Peak = Math.Max(0f, _peak - 18f);
+                if (_peak > 0) Peak = 0f;
                 return;
             }
 
@@ -236,7 +241,10 @@ namespace DarkVolumeMixer
                         {
                             float rawVal = meter.MasterPeakValue * 100f;
                             float scaledPeak = rawVal * (_volume / 100f);
-                            if (scaledPeak > maxPeak) maxPeak = scaledPeak;
+                            if (scaledPeak > maxPeak)
+                            {
+                                maxPeak = scaledPeak;
+                            }
                         }
                     }
                     catch
@@ -249,27 +257,38 @@ namespace DarkVolumeMixer
             float target = Math.Min(maxPeak, _volume);
 
             if (target >= _peak)
+            {
                 Peak = target;
+            }
             else
-                Peak = Math.Max(0f, _peak - ((_peak - target) * 0.35f) - 1.5f);
+            {
+                Peak = Math.Max(0f, _peak - ((_peak - target) * 0.45f) - 1.5f);
+            }
         }
 
         private void QueueVolumeApply(float volScalar)
         {
-            _pendingVolume = volScalar;
+            _targetHardwareVolume = volScalar;
 
-            if (Interlocked.Exchange(ref _isApplyingVolume, 1) == 1) return;
-
-            Task.Run(() =>
+            lock (_sessionLock)
             {
-                try
-                {
-                    while (true)
-                    {
-                        float current = _pendingVolume;
-                        if (current < 0) break;
-                        _pendingVolume = -1f;
+                if (_isApplyingLoopRunning) return;
+                _isApplyingLoopRunning = true;
+            }
 
+            _ = Task.Run(async () =>
+            {
+                while (true)
+                {
+                    float volumeToWrite;
+                    lock (_sessionLock)
+                    {
+                        volumeToWrite = _targetHardwareVolume;
+                        _targetHardwareVolume = -1f;
+                    }
+
+                    if (volumeToWrite >= 0f)
+                    {
                         lock (_sessionLock)
                         {
                             for (int i = _sessions.Count - 1; i >= 0; i--)
@@ -277,7 +296,7 @@ namespace DarkVolumeMixer
                                 try
                                 {
                                     var sav = _sessions[i].SimpleAudioVolume;
-                                    if (sav != null) sav.Volume = current;
+                                    if (sav != null) sav.Volume = volumeToWrite;
                                 }
                                 catch
                                 {
@@ -286,18 +305,24 @@ namespace DarkVolumeMixer
                             }
                         }
                     }
-                }
-                catch { }
-                finally
-                {
-                    Interlocked.Exchange(ref _isApplyingVolume, 0);
+
+                    await Task.Delay(25);
+
+                    lock (_sessionLock)
+                    {
+                        if (_targetHardwareVolume < 0f)
+                        {
+                            _isApplyingLoopRunning = false;
+                            break;
+                        }
+                    }
                 }
             });
         }
 
         private void QueueMuteApply(bool mute)
         {
-            Task.Run(() =>
+            _ = Task.Run(() =>
             {
                 lock (_sessionLock)
                 {
@@ -317,19 +342,6 @@ namespace DarkVolumeMixer
             });
         }
 
-        private static void DispatcherRun(Action action)
-        {
-            var app = System.Windows.Application.Current;
-            if (app?.Dispatcher != null && !app.Dispatcher.CheckAccess())
-            {
-                app.Dispatcher.BeginInvoke(action);
-            }
-            else
-            {
-                action();
-            }
-        }
-
         public void Dispose()
         {
             if (_isDisposed) return;
@@ -347,7 +359,7 @@ namespace DarkVolumeMixer
 
         protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
-            DispatcherRun(() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
         }
 
         protected bool SetField<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
