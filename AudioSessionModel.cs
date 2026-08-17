@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Windows.Media;
+using System.Windows.Threading;
 using NAudio.CoreAudioApi;
 
 namespace DarkVolumeMixer
@@ -28,29 +29,32 @@ namespace DarkVolumeMixer
         public float RawCalculatedPeak;
         public Action? RequestMasterUnmute { get; set; }
 
-        public AudioSessionModel(AudioSessionControl initialSession, string name, ImageSource? icon)
+        public AudioSessionModel(IEnumerable<AudioSessionControl> initialSessions, string name, ImageSource? icon)
         {
             _name = name;
             _icon = icon;
 
-            if (initialSession != null)
+            if (initialSessions != null)
             {
-                _sessions.Add(initialSession);
-                try
+                _sessions.AddRange(initialSessions);
+                if (_sessions.Count > 0)
                 {
-                    var sav = initialSession.SimpleAudioVolume;
-                    if (sav != null)
+                    try
                     {
-                        _volume = sav.Volume * 100f;
-                        _isMuted = sav.Mute;
-                        _isEnabled = !_isMuted;
+                        var sav = _sessions[0].SimpleAudioVolume;
+                        if (sav != null)
+                        {
+                            _volume = sav.Volume * 100f;
+                            _isMuted = sav.Mute;
+                            _isEnabled = !_isMuted;
+                        }
                     }
-                }
-                catch
-                {
-                    _volume = 100f;
-                    _isMuted = false;
-                    _isEnabled = true;
+                    catch
+                    {
+                        _volume = 100f;
+                        _isMuted = false;
+                        _isEnabled = true;
+                    }
                 }
             }
         }
@@ -147,33 +151,18 @@ namespace DarkVolumeMixer
             set => SetField(ref _isEnabled, value);
         }
 
-        public void AddSession(AudioSessionControl session)
+        // Ersetzt alte Sessions sauber, statt sie endlos aufzustauen
+        public void SyncSessions(IEnumerable<AudioSessionControl> newSessions)
         {
-            if (session == null || _isDisposed) return;
+            if (_isDisposed) return;
 
             lock (_sessionLock)
             {
-                for (int i = 0; i < _sessions.Count; i++)
-                {
-                    if (ReferenceEquals(_sessions[i], session)) return;
-                }
-
-                _sessions.Add(session);
-
-                try
-                {
-                    var sav = session.SimpleAudioVolume;
-                    if (sav != null)
-                    {
-                        sav.Volume = _volume / 100f;
-                        sav.Mute = _isMuted;
-                    }
-                }
-                catch { }
+                _sessions.Clear();
+                _sessions.AddRange(newSessions);
             }
         }
 
-        // Läuft rein im Hintergrund-Thread: Berechnet Peaks UND fängt externe Mute/Volume-Änderungen ab
         public void UpdateRawPeak()
         {
             if (_isDisposed) return;
@@ -194,7 +183,6 @@ namespace DarkVolumeMixer
                     {
                         var session = _sessions[i];
 
-                        // Externe Lautstärke- und Mute-Änderungen aus Windows erfassen
                         if (shouldCheckExternal && !isUserInteracting)
                         {
                             var sav = session.SimpleAudioVolume;
@@ -222,7 +210,6 @@ namespace DarkVolumeMixer
                             }
                         }
 
-                        // Peak-Messung
                         if (!_isMuted && _volume > 0.01f)
                         {
                             var meter = session.AudioMeterInformation;
@@ -300,7 +287,7 @@ namespace DarkVolumeMixer
             var app = System.Windows.Application.Current;
             if (app?.Dispatcher != null && !app.Dispatcher.CheckAccess())
             {
-                app.Dispatcher.BeginInvoke(action);
+                app.Dispatcher.BeginInvoke(action, DispatcherPriority.Background);
             }
             else
             {

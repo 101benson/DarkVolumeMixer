@@ -310,9 +310,9 @@ public void ExecuteLoadAudioSessions()
             catch { }
         }
 
-        var currentCardNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Sessions pro App gruppieren – verhindert Zombie-Duplikate!
+        var detectedCards = new Dictionary<string, (List<AudioSessionControl> sessionList, ImageSource? icon)>(StringComparer.OrdinalIgnoreCase);
         int discordZaehler = 0;
-        var detectedCards = new List<(AudioSessionControl session, string appName, ImageSource? icon)>();
 
         foreach (var session in activeSessions)
         {
@@ -327,29 +327,36 @@ public void ExecuteLoadAudioSessions()
                 else if (discordZaehler > 2) appName = $"Discord ({discordZaehler})";
             }
 
-            currentCardNames.Add(appName);
-            ImageSource? icon = GetAppIcon(session);
-            detectedCards.Add((session, appName, icon));
+            if (!detectedCards.TryGetValue(appName, out var cardData))
+            {
+                ImageSource? icon = GetAppIcon(session);
+                cardData = (new List<AudioSessionControl>(), icon);
+                detectedCards[appName] = cardData;
+            }
+            cardData.sessionList.Add(session);
         }
 
         Dispatcher.Invoke(() =>
         {
             var cardMap = Sessions.ToDictionary(s => s.Name, s => s, StringComparer.OrdinalIgnoreCase);
 
-            foreach (var item in detectedCards)
+            foreach (var kvp in detectedCards)
             {
-                if (cardMap.TryGetValue(item.appName, out var existingCard))
+                string appName = kvp.Key;
+                var (sessionList, icon) = kvp.Value;
+
+                if (cardMap.TryGetValue(appName, out var existingCard))
                 {
-                    existingCard.AddSession(item.session);
+                    existingCard.SyncSessions(sessionList);
                 }
                 else
                 {
-                    if (item.appName.Equals("Discord", StringComparison.OrdinalIgnoreCase) && item.session.SimpleAudioVolume != null && AppSettings.Current.AutoVolumeDiscord)
+                    if (appName.Equals("Discord", StringComparison.OrdinalIgnoreCase) && sessionList.Count > 0 && sessionList[0].SimpleAudioVolume != null && AppSettings.Current.AutoVolumeDiscord)
                     {
-                        item.session.SimpleAudioVolume.Volume = AppSettings.Current.DiscordVolumeValue / 100f; 
+                        sessionList[0].SimpleAudioVolume.Volume = AppSettings.Current.DiscordVolumeValue / 100f; 
                     }
 
-                    var newCard = new AudioSessionModel(item.session, item.appName, item.icon)
+                    var newCard = new AudioSessionModel(sessionList, appName, icon)
                     {
                         RequestMasterUnmute = () => { if (IsMasterMuted) IsMasterMuted = false; }
                     };
@@ -359,12 +366,11 @@ public void ExecuteLoadAudioSessions()
                     if (AppSettings.Current.PinnedSessionIds != null)
                     {
                         bool shouldBePinned = AppSettings.Current.PinnedSessionIds.Any(id => 
-                            id.Equals(item.appName, StringComparison.OrdinalIgnoreCase) ||
-                            (id.Contains("PUBG", StringComparison.OrdinalIgnoreCase) && item.appName.Contains("PUBG", StringComparison.OrdinalIgnoreCase)));
+                            id.Equals(appName, StringComparison.OrdinalIgnoreCase) ||
+                            (id.Contains("PUBG", StringComparison.OrdinalIgnoreCase) && appName.Contains("PUBG", StringComparison.OrdinalIgnoreCase)));
                         if (shouldBePinned) newCard.IsPinned = true;
                     }
 
-                    // --- Sortier-Logik: Pinned immer nach vorne ---
                     if (newCard.IsPinned)
                     {
                         int insertIndex = 0;
@@ -420,11 +426,11 @@ public void ExecuteLoadAudioSessions()
                         AppSettings.Current.SessionOrder.Add(newCard.Name);
 
                     AppSettings.Save();
-                    cardMap[item.appName] = newCard;
+                    cardMap[appName] = newCard;
                 }
             }
 
-            var deadCards = Sessions.Where(s => !currentCardNames.Contains(s.Name)).ToList();
+            var deadCards = Sessions.Where(s => !detectedCards.ContainsKey(s.Name)).ToList();
             if (deadCards.Count > 0)
             {
                 foreach (var dead in deadCards)
