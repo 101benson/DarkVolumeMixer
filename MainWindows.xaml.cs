@@ -26,10 +26,11 @@ namespace DarkVolumeMixer
         public ObservableCollection<AudioSessionModel> Sessions { get; set; } = new ObservableCollection<AudioSessionModel>();
         public ObservableCollection<MMDevice> Devices { get; set; } = new ObservableCollection<MMDevice>();
 
+        private DispatcherTimer _uiRenderTimer;
         private DispatcherTimer _autoScanTimer;
         private DispatcherTimer _debounceScanTimer;
         
-        private CancellationTokenSource? _meterLoopCts;
+        private CancellationTokenSource? _bgPeakCts;
         private MMDevice? _selectedDevice;
         private ImageSource? _systemIcon;
         private ImageSource? _razerIcon;
@@ -40,24 +41,16 @@ namespace DarkVolumeMixer
         private float _masterVolume;
         private bool _isMasterMuted;
         private float _masterPeak;
+        private float _rawMasterPeak;
         private bool _isAlwaysOnTop = false;
         private int _scanLock = 0;
-
-        private long _lastMasterUserInteractionTicks;
-        private float _targetMasterHardwareVol = -1f;
-        private bool _isMasterLoopRunning;
 
         private System.Windows.Forms.NotifyIcon? _notifyIcon;
         private System.Windows.Point _dragStartPoint;
         private AudioSessionModel? _draggedData;
 
-        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
-        private static extern int ExtractIconEx(string lpszFile, int nIconIndex, IntPtr[] phiconLarge, IntPtr[] phiconSmall, int nIcons);
-
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        private static extern uint PrivateExtractIcons(
-            string lpszFile, int nIconIndex, int cxIcon, int cyIcon,
-            IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
+        private static extern uint PrivateExtractIcons(string lpszFile, int nIconIndex, int cxIcon, int cyIcon, IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool DestroyIcon(IntPtr hIcon);
@@ -74,12 +67,6 @@ namespace DarkVolumeMixer
         public MainWindow()
         {
             InitializeComponent();
-
-            var view = System.Windows.Data.CollectionViewSource.GetDefaultView(Sessions);
-            if (view != null)
-            {
-                view.SortDescriptions.Clear();
-            }
 
             DataContext = this;
             SessionList.ItemsSource = Sessions;
@@ -106,20 +93,10 @@ namespace DarkVolumeMixer
                     _masterVolume = defaultDevice.AudioEndpointVolume.MasterVolumeLevelScalar * 100f;
                     _isMasterMuted = defaultDevice.AudioEndpointVolume.Mute;
                 }
-
-                var args = Environment.GetCommandLineArgs();
-                for (int i = 0; i < args.Length - 1; i++)
-                {
-                    string arg = args[i].ToLower();
-                    if (arg == "-x" || arg == "--x") { if (double.TryParse(args[i + 1], out double val)) Left = val; }
-                    if (arg == "-y" || arg == "--y") { if (double.TryParse(args[i + 1], out double val)) Top = val; }
-                    if (arg == "-h" || arg == "--height") { if (double.TryParse(args[i + 1], out double val)) Height = val; }
-                    if (arg == "-w" || arg == "--width") { if (double.TryParse(args[i + 1], out double val)) Width = val; }
-                }
             }
             catch { }
 
-            _ = Task.Run(() =>
+            ThreadPool.QueueUserWorkItem(_ =>
             {
                 _systemIcon = ExtractSystemSoundsIcon();
                 _defaultAppIcon = ExtractDefaultApplicationIcon();
@@ -129,161 +106,103 @@ namespace DarkVolumeMixer
             LoadDevices();
             SetupTrayIcon();
 
-            _debounceScanTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
-            _debounceScanTimer.Tick += async (s, e) => 
-            { 
-                _debounceScanTimer.Stop(); 
-                await Task.Run(ExecuteLoadAudioSessions); 
-            };
+            _debounceScanTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+            _debounceScanTimer.Tick += (s, e) => { _debounceScanTimer.Stop(); ThreadPool.QueueUserWorkItem(_ => ExecuteLoadAudioSessions()); };
 
-            // Schnellerer Scan für sofortiges Erkennen beim Starten/Schließen von Apps
-            _autoScanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
-            _autoScanTimer.Tick += (s, e) => 
-            {
-                _ = Task.Run(ExecuteLoadAudioSessions);
-            };
+            _autoScanTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            _autoScanTimer.Tick += (s, e) => ThreadPool.QueueUserWorkItem(_ => ExecuteLoadAudioSessions());
             _autoScanTimer.Start();
 
-            ExecuteLoadAudioSessions();
-            StartBackgroundMeterLoop();
+            // UI Render Timer: Zieht sich die Werte frame-synchron ab (KEIN Überlauf möglich!)
+            _uiRenderTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) }; // 30 FPS
+            _uiRenderTimer.Tick += UiRenderTimer_Tick;
+            _uiRenderTimer.Start();
+
+            ThreadPool.QueueUserWorkItem(_ => ExecuteLoadAudioSessions());
+            StartBackgroundAudioWorker();
         }
 
-        private void AudioEndpointVolume_OnVolumeNotification(AudioVolumeNotificationData data)
+        // Reine Hintergrund-Berechnung (NUR Speicher, 0 Dispatcher-Aufrufe)
+        private void StartBackgroundAudioWorker()
         {
-            long lastInteraction = Interlocked.Read(ref _lastMasterUserInteractionTicks);
-            if (DateTime.UtcNow.Ticks - lastInteraction < TimeSpan.FromMilliseconds(700).Ticks) return;
+            _bgPeakCts?.Cancel();
+            _bgPeakCts = new CancellationTokenSource();
+            var token = _bgPeakCts.Token;
 
-            Dispatcher.InvokeAsync(() =>
+            ThreadPool.QueueUserWorkItem(async _ =>
             {
-                bool externalMute = data.Muted;
-                float externalVol = data.MasterVolume * 100f;
-
-                if (_isMasterMuted != externalMute)
-                {
-                    _isMasterMuted = externalMute;
-                    OnPropertyChanged(nameof(IsMasterMuted));
-                    OnPropertyChanged(nameof(IsMasterEnabled));
-
-                    foreach (var s in Sessions)
-                    {
-                        s.IsMuted = externalMute;
-                    }
-                }
-
-                if (Math.Abs(_masterVolume - externalVol) > 1.0f)
-                {
-                    _masterVolume = externalVol;
-                    OnPropertyChanged(nameof(MasterVolume));
-                }
-            });
-        }
-
-        private void AudioSessionManager_OnSessionCreated(object? sender, IAudioSessionControl newSession)
-        {
-            Dispatcher.InvokeAsync(() => TriggerAudioSessionScan());
-        }
-
-        private void StartBackgroundMeterLoop()
-        {
-            _meterLoopCts?.Cancel();
-            _meterLoopCts = new CancellationTokenSource();
-            var token = _meterLoopCts.Token;
-
-            _ = Task.Run(async () =>
-            {
-                int slowCheckCounter = 0;
-
                 while (!token.IsCancellationRequested)
                 {
-                    bool isVisible = false;
-                    await Dispatcher.InvokeAsync(() => isVisible = IsVisible && WindowState != WindowState.Minimized);
-
-                    if (!isVisible)
-                    {
-                        await Task.Delay(1000, token);
-                        continue;
-                    }
-
                     try
                     {
                         if (_selectedDevice != null)
                         {
-                            float rawPeak = 0f;
-                            try
-                            {
-                                rawPeak = _selectedDevice.AudioMeterInformation.MasterPeakValue * 100f;
-                            }
-                            catch { }
-
-                            float targetMasterPeak = _isMasterMuted ? 0f : rawPeak * (_masterVolume / 100f);
-
-                            if (targetMasterPeak >= _masterPeak)
-                                _masterPeak = targetMasterPeak;
-                            else
-                                _masterPeak = Math.Max(0f, _masterPeak - ((_masterPeak - targetMasterPeak) * 0.45f) - 1.5f);
-
-                            _ = Dispatcher.BeginInvoke(() => OnPropertyChanged(nameof(MasterPeak)), DispatcherPriority.Background);
-
-                            slowCheckCounter++;
-                            if (slowCheckCounter >= 12)
-                            {
-                                slowCheckCounter = 0;
-
-                                for (int i = Sessions.Count - 1; i >= 0; i--)
-                                {
-                                    if (i < Sessions.Count)
-                                    {
-                                        Sessions[i]?.CheckExternalVolumeChanges();
-                                    }
-                                }
-                            }
+                            float raw = 0f;
+                            try { raw = _selectedDevice.AudioMeterInformation.MasterPeakValue * 100f; } catch { }
+                            _rawMasterPeak = _isMasterMuted ? 0f : raw * (_masterVolume / 100f);
                         }
 
-                        for (int i = Sessions.Count - 1; i >= 0; i--)
+                        for (int i = 0; i < Sessions.Count; i++)
                         {
                             if (i < Sessions.Count)
                             {
-                                Sessions[i]?.UpdatePeak();
+                                Sessions[i]?.UpdateRawPeak();
                             }
                         }
                     }
                     catch { }
 
-                    await Task.Delay(35, token);
+                    try { await Task.Delay(30, token); } catch { break; }
                 }
-            }, token);
+            });
         }
 
-        private void Window_Loaded(object sender, RoutedEventArgs e) => AdjustWindowWidthToContent();
-
-        private void AppIcon_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        // UI holt sich die Werte ab
+        private void UiRenderTimer_Tick(object? sender, EventArgs e)
         {
-            if (sender is FrameworkElement element && element.DataContext is AudioSessionModel session)
+            if (!IsVisible || WindowState == WindowState.Minimized) return;
+
+            // Master Peak Glätten
+            float target = _rawMasterPeak;
+            if (target >= _masterPeak)
+                _masterPeak = target;
+            else
+                _masterPeak = Math.Max(0f, _masterPeak - ((_masterPeak - target) * 0.45f) - 1.5f);
+
+            OnPropertyChanged(nameof(MasterPeak));
+
+            // App Peaks Glätten
+            for (int i = 0; i < Sessions.Count; i++)
             {
-                session.IsPinned = !session.IsPinned;
-                ReorderSessionsAfterPin(session);
+                Sessions[i]?.RenderTickPeak();
             }
         }
 
-        private void AdjustWindowWidthToContent()
+        private void AudioEndpointVolume_OnVolumeNotification(AudioVolumeNotificationData data)
         {
-            if (!AppSettings.Current.AutoAdjustWidth) return;
-
-            try
+            Dispatcher.InvokeAsync(() =>
             {
-                double masterWidth = 111;
-                double cardWidth = 112;
-                double windowPadding = 20;
+                bool extMute = data.Muted;
+                float extVol = data.MasterVolume * 100f;
 
-                double calculatedWidth = windowPadding + masterWidth + (Sessions.Count * cardWidth) + 28;
+                if (_isMasterMuted != extMute)
+                {
+                    _isMasterMuted = extMute;
+                    OnPropertyChanged(nameof(IsMasterMuted));
+                    OnPropertyChanged(nameof(IsMasterEnabled));
+                    foreach (var s in Sessions) s.IsMuted = extMute;
+                }
 
-                if (calculatedWidth < 380) calculatedWidth = 380;
-
-                this.Width = calculatedWidth;
-                this.UpdateLayout();
-            }
-            catch (Exception) { }
+                if (Math.Abs(_masterVolume - extVol) > 1.0f)
+                {
+                    _masterVolume = extVol;
+                    OnPropertyChanged(nameof(MasterVolume));
+                }
+            });
         }
+
+        private void AudioSessionManager_OnSessionCreated(object? sender, IAudioSessionControl newSession) =>
+            Dispatcher.InvokeAsync(TriggerAudioSessionScan);
 
         private void TriggerAudioSessionScan()
         {
@@ -292,6 +211,26 @@ namespace DarkVolumeMixer
         }
 
         public void LoadAudioSessions() => TriggerAudioSessionScan();
+
+        private static bool IsSessionAlive(AudioSessionControl session)
+        {
+            try
+            {
+                if (session.State == AudioSessionState.AudioSessionStateExpired) return false;
+                int pid = 0;
+                try { pid = (int)session.GetProcessID; } catch { }
+                if (pid <= 0) return true;
+
+                try
+                {
+                    using var proc = Process.GetProcessById(pid);
+                    return !proc.HasExited;
+                }
+                catch (ArgumentException) { return false; }
+                catch { return true; }
+            }
+            catch { return false; }
+        }
 
         private string GetGenericAppName(AudioSessionControl session)
         {
@@ -306,17 +245,13 @@ namespace DarkVolumeMixer
                     string procName = proc.ProcessName;
 
                     if (procName.Contains("discord", StringComparison.OrdinalIgnoreCase)) return "Discord";
-
                     if (procName.Contains("webhelper", StringComparison.OrdinalIgnoreCase) || 
                         procName.Equals("gameoverlayui", StringComparison.OrdinalIgnoreCase) ||
                         procName.Equals("steamservice", StringComparison.OrdinalIgnoreCase) ||
-                        procName.StartsWith("steam", StringComparison.OrdinalIgnoreCase)) 
-                        return "Steam";
-
+                        procName.StartsWith("steam", StringComparison.OrdinalIgnoreCase)) return "Steam";
                     if (procName.Equals("tslgame", StringComparison.OrdinalIgnoreCase) || 
                         procName.Equals("coherentui_host", StringComparison.OrdinalIgnoreCase) ||
-                        procName.Equals("pubg", StringComparison.OrdinalIgnoreCase)) 
-                        return "PUBG: Battlegrounds";
+                        procName.Equals("pubg", StringComparison.OrdinalIgnoreCase)) return "PUBG: Battlegrounds";
 
                     string[] suffixesToStrip = { "worker", "helper", "host", "service", "broker", "query", "renderer", "overlay", "limiter", "_be", "_dx11", "-x64" };
                     string lowerName = procName.ToLower();
@@ -328,7 +263,6 @@ namespace DarkVolumeMixer
                             lowerName = procName.ToLower();
                         }
                     }
-
                     return System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(procName.ToLower());
                 }
             }
@@ -341,203 +275,143 @@ namespace DarkVolumeMixer
                 if (fallbackName.Contains("discord", StringComparison.OrdinalIgnoreCase)) return "Discord";
                 return fallbackName;
             }
-
             return "Systemsounds";
         }
 
-
-private static bool IsSessionAlive(AudioSessionControl session)
-{
-    try
-    {
-        // Nur verwerfen, wenn Windows die Session explizit als beendet deklariert
-        if (session.State == AudioSessionState.AudioSessionStateExpired)
-            return false;
-
-        return true;
-    }
-    catch
-    {
-        return false;
-    }
-}
-
-public void ExecuteLoadAudioSessions()
-{
-    if (Interlocked.Exchange(ref _scanLock, 1) == 1) return;
-
-    try
-    {
-        if (_selectedDevice == null) return;
-
-        var sessionManager = _selectedDevice.AudioSessionManager;
-        if (sessionManager == null) return;
-
-        try
+        public void ExecuteLoadAudioSessions()
         {
-            sessionManager.RefreshSessions();
-        }
-        catch { }
+            if (Interlocked.Exchange(ref _scanLock, 1) == 1) return;
 
-        var sessions = sessionManager.Sessions;
-        if (sessions == null) return;
-
-        int count = sessions.Count;
-        var activeSessions = new List<AudioSessionControl>();
-
-        for (int i = 0; i < count; i++)
-        {
             try
             {
-                var session = sessions[i];
-                if (session != null && IsSessionAlive(session))
+                if (_selectedDevice == null) return;
+                var sessionManager = _selectedDevice.AudioSessionManager;
+                if (sessionManager == null) return;
+
+                try { sessionManager.RefreshSessions(); } catch { }
+                var sessions = sessionManager.Sessions;
+                if (sessions == null) return;
+
+                int count = sessions.Count;
+                var activeSessions = new List<AudioSessionControl>();
+
+                for (int i = 0; i < count; i++)
                 {
-                    activeSessions.Add(session);
-                }
-            }
-            catch { }
-        }
-
-        var currentCardNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        int discordZaehler = 0;
-        var detectedCards = new List<(AudioSessionControl session, string appName, ImageSource? icon)>();
-
-        foreach (var session in activeSessions)
-        {
-            string appName = GetGenericAppName(session);
-            if (string.IsNullOrEmpty(appName)) continue;
-
-            if (appName.Equals("Discord", StringComparison.OrdinalIgnoreCase))
-            {
-                discordZaehler++;
-                if (discordZaehler == 1) appName = "Discord";
-                else if (discordZaehler == 2) appName = "Discord (Voice)";
-                else if (discordZaehler > 2) appName = $"Discord ({discordZaehler})";
-            }
-
-            currentCardNames.Add(appName);
-            ImageSource? icon = GetAppIcon(session);
-            detectedCards.Add((session, appName, icon));
-        }
-
-        Dispatcher.Invoke(() =>
-        {
-            var cardMap = Sessions.ToDictionary(s => s.Name, s => s, StringComparer.OrdinalIgnoreCase);
-
-            foreach (var item in detectedCards)
-            {
-                if (cardMap.TryGetValue(item.appName, out var existingCard))
-                {
-                    existingCard.AddSession(item.session);
-                }
-                else
-                {
-                    if (item.appName.Equals("Discord", StringComparison.OrdinalIgnoreCase) && item.session.SimpleAudioVolume != null && AppSettings.Current.AutoVolumeDiscord)
+                    try
                     {
-                        item.session.SimpleAudioVolume.Volume = AppSettings.Current.DiscordVolumeValue / 100f; 
+                        var session = sessions[i];
+                        if (session != null && IsSessionAlive(session)) activeSessions.Add(session);
+                    }
+                    catch { }
+                }
+
+                var currentCardNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                int discordZaehler = 0;
+                var detectedCards = new List<(AudioSessionControl session, string appName, ImageSource? icon)>();
+
+                foreach (var session in activeSessions)
+                {
+                    string appName = GetGenericAppName(session);
+                    if (string.IsNullOrEmpty(appName)) continue;
+
+                    if (appName.Equals("Discord", StringComparison.OrdinalIgnoreCase))
+                    {
+                        discordZaehler++;
+                        if (discordZaehler == 1) appName = "Discord";
+                        else if (discordZaehler == 2) appName = "Discord (Voice)";
+                        else if (discordZaehler > 2) appName = $"Discord ({discordZaehler})";
                     }
 
-                    var newCard = new AudioSessionModel(item.session, item.appName, item.icon)
+                    currentCardNames.Add(appName);
+                    ImageSource? icon = GetAppIcon(session);
+                    detectedCards.Add((session, appName, icon));
+                }
+
+                Dispatcher.Invoke(() =>
+                {
+                    var cardMap = Sessions.ToDictionary(s => s.Name, s => s, StringComparer.OrdinalIgnoreCase);
+
+                    foreach (var item in detectedCards)
                     {
-                        RequestMasterUnmute = () =>
+                        if (cardMap.TryGetValue(item.appName, out var existingCard))
                         {
-                            if (IsMasterMuted) IsMasterMuted = false;
+                            existingCard.AddSession(item.session);
                         }
-                    };
-
-                    if (IsMasterMuted)
-                    {
-                        newCard.IsMuted = true;
-                    }
-
-                    if (AppSettings.Current.PinnedSessionIds != null)
-                    {
-                        bool shouldBePinned = AppSettings.Current.PinnedSessionIds.Any(id => 
-                            id.Equals(item.appName, StringComparison.OrdinalIgnoreCase) ||
-                            (id.Contains("PUBG", StringComparison.OrdinalIgnoreCase) && item.appName.Contains("PUBG", StringComparison.OrdinalIgnoreCase)));
-                        
-                        if (shouldBePinned) newCard.IsPinned = true;
-                    }
-
-                    int targetIndex = -1;
-                    if (AppSettings.Current.SessionOrder != null)
-                    {
-                        int savedRank = AppSettings.Current.SessionOrder.IndexOf(newCard.Name);
-                        if (savedRank >= 0)
+                        else
                         {
-                            for (int i = 0; i < Sessions.Count; i++)
+                            if (item.appName.Equals("Discord", StringComparison.OrdinalIgnoreCase) && item.session.SimpleAudioVolume != null && AppSettings.Current.AutoVolumeDiscord)
                             {
-                                int otherRank = AppSettings.Current.SessionOrder.IndexOf(Sessions[i].Name);
-                                if (otherRank < 0 || otherRank > savedRank)
+                                item.session.SimpleAudioVolume.Volume = AppSettings.Current.DiscordVolumeValue / 100f; 
+                            }
+
+                            var newCard = new AudioSessionModel(item.session, item.appName, item.icon)
+                            {
+                                RequestMasterUnmute = () => { if (IsMasterMuted) IsMasterMuted = false; }
+                            };
+
+                            if (IsMasterMuted) newCard.IsMuted = true;
+
+                            if (AppSettings.Current.PinnedSessionIds != null)
+                            {
+                                bool shouldBePinned = AppSettings.Current.PinnedSessionIds.Any(id => 
+                                    id.Equals(item.appName, StringComparison.OrdinalIgnoreCase) ||
+                                    (id.Contains("PUBG", StringComparison.OrdinalIgnoreCase) && item.appName.Contains("PUBG", StringComparison.OrdinalIgnoreCase)));
+                                if (shouldBePinned) newCard.IsPinned = true;
+                            }
+
+                            int targetIndex = -1;
+                            if (AppSettings.Current.SessionOrder != null)
+                            {
+                                int savedRank = AppSettings.Current.SessionOrder.IndexOf(newCard.Name);
+                                if (savedRank >= 0)
                                 {
-                                    targetIndex = i;
-                                    break;
+                                    for (int i = 0; i < Sessions.Count; i++)
+                                    {
+                                        int otherRank = AppSettings.Current.SessionOrder.IndexOf(Sessions[i].Name);
+                                        if (otherRank < 0 || otherRank > savedRank) { targetIndex = i; break; }
+                                    }
                                 }
                             }
+
+                            if (targetIndex >= 0 && targetIndex < Sessions.Count) Sessions.Insert(targetIndex, newCard);
+                            else if (newCard.IsPinned)
+                            {
+                                int insertIndex = 0;
+                                while (insertIndex < Sessions.Count && Sessions[insertIndex].IsPinned) insertIndex++;
+                                Sessions.Insert(insertIndex, newCard);
+                            }
+                            else Sessions.Add(newCard);
+
+                            if (AppSettings.Current.SessionOrder == null) AppSettings.Current.SessionOrder = new List<string>();
+                            if (!AppSettings.Current.SessionOrder.Contains(newCard.Name, StringComparer.OrdinalIgnoreCase)) AppSettings.Current.SessionOrder.Add(newCard.Name);
+
+                            AppSettings.Save();
+                            cardMap[item.appName] = newCard;
                         }
                     }
 
-                    if (targetIndex >= 0 && targetIndex < Sessions.Count)
+                    var deadCards = Sessions.Where(s => !currentCardNames.Contains(s.Name)).ToList();
+                    if (deadCards.Count > 0)
                     {
-                        Sessions.Insert(targetIndex, newCard);
-                    }
-                    else if (newCard.IsPinned)
-                    {
-                        int insertIndex = 0;
-                        while (insertIndex < Sessions.Count && Sessions[insertIndex].IsPinned) insertIndex++;
-                        Sessions.Insert(insertIndex, newCard);
-                    }
-                    else
-                    {
-                        Sessions.Add(newCard);
+                        foreach (var dead in deadCards)
+                        {
+                            dead.Dispose();
+                            Sessions.Remove(dead);
+                        }
+                        AppSettings.Save();
                     }
 
-                    if (AppSettings.Current.SessionOrder == null)
-                        AppSettings.Current.SessionOrder = new List<string>();
-
-                    if (!AppSettings.Current.SessionOrder.Contains(newCard.Name, StringComparer.OrdinalIgnoreCase))
-                        AppSettings.Current.SessionOrder.Add(newCard.Name);
-
-                    AppSettings.Save();
-                    cardMap[item.appName] = newCard;
-                }
+                    AdjustWindowWidthToContent();
+                });
             }
-
-            // Kacheln entfernen, deren Session beendet wurde
-            var deadCards = Sessions.Where(s => !currentCardNames.Contains(s.Name)).ToList();
-            if (deadCards.Count > 0)
-            {
-                foreach (var dead in deadCards)
-                {
-                    dead.Dispose();
-                    Sessions.Remove(dead);
-                }
-                AppSettings.Save();
-            }
-
-            AdjustWindowWidthToContent();
-        });
-    }
-    catch { }
-    finally
-    {
-        Interlocked.Exchange(ref _scanLock, 0);
-    }
-}
-
-
-        private static MMDevice? TryGetDevice(MMDeviceEnumerator enumerator, string id)
-        {
-            try { return enumerator.GetDevice(id); } catch { return null; }
+            catch { }
+            finally { Interlocked.Exchange(ref _scanLock, 0); }
         }
 
         private ImageSource? GetAppIcon(AudioSessionControl session)
         {
             string appName = GetGenericAppName(session);
-            if (appName.Equals("System sounds", StringComparison.OrdinalIgnoreCase) || 
-                appName.Equals("Systemsounds", StringComparison.OrdinalIgnoreCase)) 
-                return _systemIcon;
-
+            if (appName.Equals("System sounds", StringComparison.OrdinalIgnoreCase) || appName.Equals("Systemsounds", StringComparison.OrdinalIgnoreCase)) return _systemIcon;
             if (_iconCache.TryGetValue(appName, out var cached)) return cached;
 
             try
@@ -587,7 +461,6 @@ public void ExecuteLoadAudioSessions()
             try
             {
                 if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return null;
-
                 using var sysIcon = System.Drawing.Icon.ExtractAssociatedIcon(filePath);
                 if (sysIcon != null && sysIcon.Handle != IntPtr.Zero)
                 {
@@ -672,6 +545,21 @@ public void ExecuteLoadAudioSessions()
             return null;
         }
 
+        private void AdjustWindowWidthToContent()
+        {
+            if (!AppSettings.Current.AutoAdjustWidth) return;
+            try
+            {
+                double masterWidth = 111;
+                double cardWidth = 112;
+                double windowPadding = 20;
+                double calculatedWidth = windowPadding + masterWidth + (Sessions.Count * cardWidth) + 28;
+                if (calculatedWidth < 380) calculatedWidth = 380;
+                this.Width = calculatedWidth;
+            }
+            catch { }
+        }
+
         public bool IsDiscordLimiterActive
         {
             get => AppSettings.Current.AutoVolumeDiscord;
@@ -692,7 +580,6 @@ public void ExecuteLoadAudioSessions()
             try
             {
                 System.Drawing.Icon? trayIcon = null;
-
                 try
                 {
                     var iconUri = new Uri("pack://application:,,,/app.ico", UriKind.Absolute);
@@ -705,18 +592,9 @@ public void ExecuteLoadAudioSessions()
                 }
                 catch { }
 
-                if (trayIcon == null)
-                {
-                    trayIcon = File.Exists("app.ico") ? new System.Drawing.Icon("app.ico") : System.Drawing.SystemIcons.Application;
-                }
+                if (trayIcon == null) trayIcon = File.Exists("app.ico") ? new System.Drawing.Icon("app.ico") : System.Drawing.SystemIcons.Application;
 
-                _notifyIcon = new System.Windows.Forms.NotifyIcon
-                {
-                    Icon = trayIcon,
-                    Text = "Dark Volume Mixer",
-                    Visible = true
-                };
-
+                _notifyIcon = new System.Windows.Forms.NotifyIcon { Icon = trayIcon, Text = "Dark Volume Mixer", Visible = true };
                 var contextMenu = new System.Windows.Forms.ContextMenuStrip();
                 contextMenu.Items.Add("Öffnen", null, (s, e) => Dispatcher.Invoke(RestoreWindow));
                 contextMenu.Items.Add("Einstellungen...", null, (s, e) => Dispatcher.Invoke(OpenSettingsWindow));
@@ -724,30 +602,15 @@ public void ExecuteLoadAudioSessions()
                 contextMenu.Items.Add("Beenden", null, (s, e) => Dispatcher.Invoke(ShutdownApp));
 
                 _notifyIcon.ContextMenuStrip = contextMenu;
-                
-                _notifyIcon.MouseClick += (s, e) =>
-                {
-                    if (e.Button == System.Windows.Forms.MouseButtons.Left)
-                    {
-                        Dispatcher.Invoke(RestoreWindow);
-                    }
-                };
-                _notifyIcon.DoubleClick += (s, e) => Dispatcher.Invoke(RestoreWindow);
+                _notifyIcon.MouseClick += (s, e) => { if (e.Button == System.Windows.Forms.MouseButtons.Left) Dispatcher.Invoke(RestoreWindow); };
             }
             catch { }
         }
 
         private void RestoreWindow()
         {
-            if (!IsVisible)
-            {
-                Show();
-            }
-            if (WindowState == WindowState.Minimized)
-            {
-                WindowState = WindowState.Normal;
-            }
-            
+            if (!IsVisible) Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
             Activate();
             Topmost = true;
             Topmost = _isAlwaysOnTop;
@@ -762,7 +625,6 @@ public void ExecuteLoadAudioSessions()
                 _isAlwaysOnTop = AppSettings.Current.IsAlwaysOnTop;
                 Topmost = _isAlwaysOnTop;
                 OnPropertyChanged(nameof(IsAlwaysOnTop));
-
                 AdjustWindowWidthToContent();
                 OnPropertyChanged(nameof(IsDiscordLimiterActive));
                 TriggerAudioSessionScan();
@@ -844,10 +706,7 @@ public void ExecuteLoadAudioSessions()
                 if (FindVisualParent<Slider>(depObj) != null ||
                     FindVisualParent<Thumb>(depObj) != null ||
                     FindVisualParent<RepeatButton>(depObj) != null ||
-                    FindVisualParent<ToggleButton>(depObj) != null)
-                {
-                    return;
-                }
+                    FindVisualParent<ToggleButton>(depObj) != null) return;
             }
 
             if (sender is Border border && border.DataContext is AudioSessionModel session && session.IsEnabled)
@@ -903,8 +762,6 @@ public void ExecuteLoadAudioSessions()
                 if (_isMasterMuted != value)
                 {
                     _isMasterMuted = value;
-                    Interlocked.Exchange(ref _lastMasterUserInteractionTicks, DateTime.UtcNow.Ticks);
-
                     if (_selectedDevice != null)
                     {
                         try { _selectedDevice.AudioEndpointVolume.Mute = value; } catch { }
@@ -913,10 +770,7 @@ public void ExecuteLoadAudioSessions()
                     OnPropertyChanged(nameof(IsMasterMuted));
                     OnPropertyChanged(nameof(IsMasterEnabled));
 
-                    foreach (var session in Sessions)
-                    {
-                        session.IsMuted = value;
-                    }
+                    foreach (var session in Sessions) session.IsMuted = value;
                 }
             }
         }
@@ -931,7 +785,6 @@ public void ExecuteLoadAudioSessions()
                     if (_selectedDevice != null)
                     {
                         try { _selectedDevice.AudioEndpointVolume.OnVolumeNotification -= AudioEndpointVolume_OnVolumeNotification; } catch { }
-
                         if (_selectedDevice.AudioSessionManager != null)
                         {
                             try { _selectedDevice.AudioSessionManager.OnSessionCreated -= AudioSessionManager_OnSessionCreated; } catch { }
@@ -995,64 +848,25 @@ public void ExecuteLoadAudioSessions()
                 {
                     float oldMaster = _masterVolume;
                     _masterVolume = clamped;
-                    Interlocked.Exchange(ref _lastMasterUserInteractionTicks, DateTime.UtcNow.Ticks);
                     OnPropertyChanged(nameof(MasterVolume));
 
-                    if (_masterVolume > 0 && IsMasterMuted)
-                    {
-                        IsMasterMuted = false;
-                    }
+                    if (_masterVolume > 0 && IsMasterMuted) IsMasterMuted = false;
 
                     if (AppSettings.Current.ProportionalMaster && oldMaster > 0)
                     {
                         float ratio = clamped / oldMaster;
                         foreach (var session in Sessions)
                         {
-                            if (session.IsEnabled)
-                            {
-                                session.Volume = Math.Clamp(session.Volume * ratio, 0f, 100f);
-                            }
+                            if (session.IsEnabled) session.Volume = Math.Clamp(session.Volume * ratio, 0f, 100f);
                         }
                     }
 
-                    _targetMasterHardwareVol = clamped / 100f;
-
-                    lock (Devices)
+                    float target = clamped / 100f;
+                    ThreadPool.QueueUserWorkItem(_ =>
                     {
-                        if (_isMasterLoopRunning) return;
-                        _isMasterLoopRunning = true;
-                    }
-
-                    _ = Task.Run(async () =>
-                    {
-                        while (true)
+                        if (_selectedDevice != null)
                         {
-                            float vol;
-                            lock (Devices)
-                            {
-                                vol = _targetMasterHardwareVol;
-                                _targetMasterHardwareVol = -1f;
-                            }
-
-                            if (vol >= 0f && _selectedDevice != null)
-                            {
-                                try
-                                {
-                                    _selectedDevice.AudioEndpointVolume.MasterVolumeLevelScalar = vol;
-                                }
-                                catch { }
-                            }
-
-                            await Task.Delay(25);
-
-                            lock (Devices)
-                            {
-                                if (_targetMasterHardwareVol < 0f)
-                                {
-                                    _isMasterLoopRunning = false;
-                                    break;
-                                }
-                            }
+                            try { _selectedDevice.AudioEndpointVolume.MasterVolumeLevelScalar = target; } catch { }
                         }
                     });
                 }
@@ -1096,7 +910,8 @@ public void ExecuteLoadAudioSessions()
 
         private void ShutdownApp()
         {
-            _meterLoopCts?.Cancel();
+            _bgPeakCts?.Cancel();
+            _uiRenderTimer?.Stop();
 
             if (_selectedDevice != null)
             {
@@ -1121,5 +936,19 @@ public void ExecuteLoadAudioSessions()
             }
             System.Windows.Application.Current.Shutdown();
         }
+
+private void Window_Loaded(object sender, RoutedEventArgs e)
+{
+    AdjustWindowWidthToContent();
+}
+
+private void AppIcon_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+{
+    if (sender is FrameworkElement element && element.DataContext is AudioSessionModel session)
+    {
+        session.IsPinned = !session.IsPinned;
+        ReorderSessionsAfterPin(session);
+    }
+}        
     }
 }
