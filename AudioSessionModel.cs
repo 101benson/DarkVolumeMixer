@@ -22,9 +22,10 @@ namespace DarkVolumeMixer
         private bool _isEnabled = true;
         private bool _isDisposed;
 
-        // Roher Peak-Wert im Speicher – wird vom Background-Loop ohne Dispatcher befüllt
-        public float RawCalculatedPeak;
+        private long _lastUserInteractionTicks;
+        private int _externalCheckCounter;
 
+        public float RawCalculatedPeak;
         public Action? RequestMasterUnmute { get; set; }
 
         public AudioSessionModel(AudioSessionControl initialSession, string name, ImageSource? icon)
@@ -75,6 +76,7 @@ namespace DarkVolumeMixer
                 if (Math.Abs(_volume - clamped) > 0.05f)
                 {
                     _volume = clamped;
+                    Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
                     OnPropertyChanged();
 
                     if (_volume > 0 && _isMuted)
@@ -101,6 +103,7 @@ namespace DarkVolumeMixer
                 {
                     _isMuted = value;
                     IsEnabled = !value;
+                    Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
                     OnPropertyChanged();
                     ApplyMuteDirect(value);
 
@@ -170,28 +173,65 @@ namespace DarkVolumeMixer
             }
         }
 
-        // Wird rein im Hintergrund-Thread aufgerufen (KEIN UI-Zugriff, KEIN Dispatcher!)
+        // Läuft rein im Hintergrund-Thread: Berechnet Peaks UND fängt externe Mute/Volume-Änderungen ab
         public void UpdateRawPeak()
         {
-            if (_isDisposed || _isMuted || _volume <= 0.01f)
-            {
-                RawCalculatedPeak = 0f;
-                return;
-            }
+            if (_isDisposed) return;
+
+            _externalCheckCounter++;
+            bool shouldCheckExternal = (_externalCheckCounter % 15 == 0); // alle ~450ms prüfen
+
+            long lastInteraction = Interlocked.Read(ref _lastUserInteractionTicks);
+            bool isUserInteracting = (DateTime.UtcNow.Ticks - lastInteraction < TimeSpan.FromMilliseconds(800).Ticks);
 
             float maxPeak = 0f;
+
             lock (_sessionLock)
             {
                 for (int i = _sessions.Count - 1; i >= 0; i--)
                 {
                     try
                     {
-                        var meter = _sessions[i].AudioMeterInformation;
-                        if (meter != null)
+                        var session = _sessions[i];
+
+                        // Externe Lautstärke- und Mute-Änderungen aus Windows erfassen
+                        if (shouldCheckExternal && !isUserInteracting)
                         {
-                            float rawVal = meter.MasterPeakValue * 100f;
-                            float scaledPeak = rawVal * (_volume / 100f);
-                            if (scaledPeak > maxPeak) maxPeak = scaledPeak;
+                            var sav = session.SimpleAudioVolume;
+                            if (sav != null)
+                            {
+                                bool currentMute = sav.Mute;
+                                float currentVol = sav.Volume * 100f;
+
+                                if (_isMuted != currentMute)
+                                {
+                                    _isMuted = currentMute;
+                                    _isEnabled = !currentMute;
+                                    DispatcherRun(() =>
+                                    {
+                                        OnPropertyChanged(nameof(IsMuted));
+                                        OnPropertyChanged(nameof(IsEnabled));
+                                    });
+                                }
+
+                                if (Math.Abs(_volume - currentVol) > 1.5f)
+                                {
+                                    _volume = currentVol;
+                                    DispatcherRun(() => OnPropertyChanged(nameof(Volume)));
+                                }
+                            }
+                        }
+
+                        // Peak-Messung
+                        if (!_isMuted && _volume > 0.01f)
+                        {
+                            var meter = session.AudioMeterInformation;
+                            if (meter != null)
+                            {
+                                float rawVal = meter.MasterPeakValue * 100f;
+                                float scaledPeak = rawVal * (_volume / 100f);
+                                if (scaledPeak > maxPeak) maxPeak = scaledPeak;
+                            }
                         }
                     }
                     catch
@@ -200,10 +240,10 @@ namespace DarkVolumeMixer
                     }
                 }
             }
-            RawCalculatedPeak = Math.Min(maxPeak, _volume);
+
+            RawCalculatedPeak = (_isMuted || _volume <= 0.01f) ? 0f : Math.Min(maxPeak, _volume);
         }
 
-        // UI-Thread zieht sich den Wert ab und glättet ihn
         public void RenderTickPeak()
         {
             float target = RawCalculatedPeak;
@@ -253,6 +293,19 @@ namespace DarkVolumeMixer
                     }
                 }
             });
+        }
+
+        private static void DispatcherRun(Action action)
+        {
+            var app = System.Windows.Application.Current;
+            if (app?.Dispatcher != null && !app.Dispatcher.CheckAccess())
+            {
+                app.Dispatcher.BeginInvoke(action);
+            }
+            else
+            {
+                action();
+            }
         }
 
         public void Dispose()
