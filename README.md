@@ -10,7 +10,9 @@ Per-app faders, live level meters, separate Discord chat & voice, favorites, and
 [![License: MIT](https://img.shields.io/github/license/101benson/DarkVolumeMixer?style=flat-square)](LICENSE)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-444?style=flat-square)
 
-<img width="809" height="370" alt="Dark Volume Mixer preview" src="https://github.com/user-attachments/assets/528fab08-231a-42f0-b64d-bffffac9721a" />
+<img width="820" height="386" alt="DarkVolumeMixer_v2 0 1" src="https://github.com/user-attachments/assets/c6bbc1d7-613a-454e-80f7-27bf476d3409" />
+<img width="340" height="386" alt="DarkVolumeMixer_v2 0 1_vert" src="https://github.com/user-attachments/assets/514fecbc-8936-458b-ad93-f6a01d02cb47" />
+
 
 <!-- TODO: add a screenshot of the new compact list view here -->
 
