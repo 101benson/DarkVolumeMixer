@@ -30,6 +30,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Background polling pauses while the window is hidden or minimized
 - Fewer process lookups and layout passes during session scanning
 
-## [1.0.0]
+## [1.0.x]
 
-- Initial version
+- Earlier releases, see the Releases page

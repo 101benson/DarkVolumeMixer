@@ -71,6 +71,11 @@ namespace DarkVolumeMixer
         private System.Windows.Forms.NotifyIcon? _notifyIcon;
         private System.Windows.Point _dragStartPoint;
         private AudioSessionModel? _draggedData;
+        private Border? _dragBorder;
+        private bool _isDraggingCard;
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
 
         [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         private static extern uint PrivateExtractIcons(string lpszFile, int nIconIndex, int cxIcon, int cyIcon, IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
@@ -92,6 +97,7 @@ namespace DarkVolumeMixer
         public MainWindow()
         {
             InitializeComponent();
+            ApplyWindowStyle();
             DataContext = this;
 
             Sessions.CollectionChanged += (_, _) => _sessionSnapshot = Sessions.ToArray();
@@ -129,6 +135,43 @@ namespace DarkVolumeMixer
 
             StartScan();
             StartBackgroundAudioWorker();
+        }
+
+        // ------------------------------------------------------------------ Fensterstil
+
+        private static bool IsWindows11OrNewer => Environment.OSVersion.Version.Build >= 22000;
+
+        // Transparente Fenster (AllowsTransparency) werden von Windows bei JEDER Änderung komplett neu berechnet
+        // und ruckeln deshalb beim Verschieben. Standard ist darum ein normales Fenster; die runden Ecken
+        // übernimmt unter Windows 11 das System (siehe OnSourceInitialized). Muss vor dem ersten Anzeigen gesetzt werden.
+        private void ApplyWindowStyle()
+        {
+            if (AppSettings.Current.TransparentWindow)
+            {
+                AllowsTransparency = true;
+                Background = System.Windows.Media.Brushes.Transparent;
+                RootBorder.CornerRadius = new CornerRadius(10);
+            }
+            else
+            {
+                RootBorder.CornerRadius = IsWindows11OrNewer ? new CornerRadius(8) : new CornerRadius(0);
+            }
+        }
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+
+            if (!AppSettings.Current.TransparentWindow && IsWindows11OrNewer)
+            {
+                try
+                {
+                    var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                    int cornerPreferenceRound = 2;   // DWMWCP_ROUND
+                    DwmSetWindowAttribute(hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, ref cornerPreferenceRound, sizeof(int));
+                }
+                catch { }
+            }
         }
 
         private void ApplySavedWindowBounds()
@@ -215,10 +258,19 @@ namespace DarkVolumeMixer
             float raw = 0f;
             try { raw = device.AudioMeterInformation.MasterPeakValue; } catch { }
 
-            if (_isMasterMuted) raw = 0f;
+            // Der Endpoint-Pegel wird von Windows je nach Gerät/Treiber teils schon NACH dem Master gemessen.
+            // Wieder mit dem Master zu multiplizieren dämpfte ihn doppelt (bei niedrigem Master kaum sichtbar).
+            // Darum: Pegel direkt anzeigen und nur oben am Master-Regler kappen.
+            float level = MeterMath.ToPercent(raw);
 
-            // Balken reicht nie höher als der Master-Regler
-            _rawMasterPeak = MeterMath.ToPercent(raw) * _masterVolume / 100f;
+            // Liefert das Gerät gar keinen Pegel (manche Treiber), nimm die lauteste App als Ersatz.
+            if (level < 1f)
+            {
+                foreach (var s in _sessionSnapshot)
+                    if (s.LevelPercent > level) level = s.LevelPercent;
+            }
+
+            _rawMasterPeak = _isMasterMuted ? 0f : Math.Min(level, _masterVolume);
         }
 
         // UI holt sich die Werte ab (30 FPS)
@@ -1173,6 +1225,12 @@ namespace DarkVolumeMixer
             return null;
         }
 
+        // ---- Kacheln per Maus umsortieren -------------------------------------------------------------
+        // Eigene, leichte Drag-Logik statt OLE-DragDrop: DragDrop.DoDragDrop läuft in einer modalen
+        // Schleife und ist bei transparenten Fenstern (AllowsTransparency) sehr ruckelig.
+        // Hier folgt die Kachel direkt der Maus (RenderTransform), beim Loslassen wird sie an die
+        // nächstgelegene Position gesetzt.
+
         private void AppCard_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (e.OriginalSource is DependencyObject depObj)
@@ -1183,49 +1241,123 @@ namespace DarkVolumeMixer
                     FindVisualParent<ToggleButton>(depObj) != null) return;
             }
 
-            if (sender is Border { DataContext: AudioSessionModel session } && session.IsEnabled)
+            if (sender is Border { DataContext: AudioSessionModel session } border)
             {
                 _dragStartPoint = e.GetPosition(null);
                 _draggedData = session;
+                _dragBorder = border;
             }
         }
 
-        private void AppCard_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e) => _draggedData = null;
+        private void AppCard_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e) => EndCardDrag(commit: true);
 
         private void AppCard_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
         {
-            if (e.LeftButton != MouseButtonState.Pressed || _draggedData == null) return;
+            if (_draggedData == null || _dragBorder == null) return;
 
-            Vector diff = _dragStartPoint - e.GetPosition(null);
-            if (Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance ||
-                Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
+            if (e.LeftButton != MouseButtonState.Pressed)
             {
-                if (sender is Border border)
-                {
-                    var data = _draggedData;
-                    _draggedData = null;
-                    DragDrop.DoDragDrop(border, data, System.Windows.DragDropEffects.Move);
-                }
+                EndCardDrag(commit: false);
+                return;
+            }
+
+            Vector diff = e.GetPosition(null) - _dragStartPoint;
+
+            if (!_isDraggingCard)
+            {
+                if (Math.Abs(diff.X) < SystemParameters.MinimumHorizontalDragDistance &&
+                    Math.Abs(diff.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+                BeginCardDrag();
+            }
+
+            if (_dragBorder.RenderTransform is TranslateTransform t)
+            {
+                // Kachelansicht: nur waagerecht, Listenansicht: nur senkrecht
+                t.X = _isListLayout ? 0 : diff.X;
+                t.Y = _isListLayout ? diff.Y : 0;
             }
         }
 
-        private void AppCard_Drop(object sender, System.Windows.DragEventArgs e)
+        private void BeginCardDrag()
         {
-            if (!e.Data.GetDataPresent(typeof(AudioSessionModel))) return;
+            var border = _dragBorder;
+            if (border == null) return;
 
-            if (e.Data.GetData(typeof(AudioSessionModel)) is AudioSessionModel dropped &&
-                sender is Border { DataContext: AudioSessionModel target })
+            _isDraggingCard = true;
+            border.RenderTransform = new TranslateTransform();
+            border.Opacity = 0.85;
+            border.CaptureMouse();
+            border.LostMouseCapture += CardDrag_LostMouseCapture;
+
+            if (ItemsControl.ContainerFromElement(SessionList, border) is FrameworkElement container)
+                System.Windows.Controls.Panel.SetZIndex(container, 100);
+        }
+
+        private void CardDrag_LostMouseCapture(object sender, System.Windows.Input.MouseEventArgs e) => EndCardDrag(commit: false);
+
+        private void EndCardDrag(bool commit)
+        {
+            var border = _dragBorder;
+            var model = _draggedData;
+            bool wasDragging = _isDraggingCard;
+
+            _isDraggingCard = false;
+            _draggedData = null;
+            _dragBorder = null;
+
+            if (border == null || !wasDragging) return;
+
+            border.LostMouseCapture -= CardDrag_LostMouseCapture;
+
+            // Zielposition muss VOR dem Zurücksetzen der Verschiebung berechnet werden
+            int target = commit && model != null ? FindDropIndex(border) : -1;
+
+            border.ClearValue(UIElement.RenderTransformProperty);
+            border.ClearValue(UIElement.OpacityProperty);
+            if (ItemsControl.ContainerFromElement(SessionList, border) is FrameworkElement container)
+                System.Windows.Controls.Panel.SetZIndex(container, 0);
+            if (border.IsMouseCaptured) border.ReleaseMouseCapture();
+
+            if (model != null && target >= 0)
             {
-                int oldIndex = Sessions.IndexOf(dropped);
-                int newIndex = Sessions.IndexOf(target);
-
-                if (oldIndex >= 0 && newIndex >= 0 && oldIndex != newIndex)
+                int oldIndex = Sessions.IndexOf(model);
+                if (oldIndex >= 0 && oldIndex != target)
                 {
-                    Sessions.Move(oldIndex, newIndex);
+                    Sessions.Move(oldIndex, target);
                     AppSettings.Current.SessionOrder = Sessions.Select(s => s.Name).Distinct().ToList();
                     AppSettings.Save();
                 }
             }
+        }
+
+        // Nächstgelegene Kachel (entlang der Anordnungsrichtung) zur aktuellen Mitte der gezogenen Kachel
+        private int FindDropIndex(Border dragged)
+        {
+            try
+            {
+                var center = dragged.TransformToAncestor(SessionList)
+                                    .Transform(new System.Windows.Point(dragged.ActualWidth / 2, dragged.ActualHeight / 2));
+                double axis = _isListLayout ? center.Y : center.X;
+
+                int best = -1;
+                double bestDistance = double.MaxValue;
+
+                for (int i = 0; i < Sessions.Count; i++)
+                {
+                    if (SessionList.ItemContainerGenerator.ContainerFromIndex(i) is not FrameworkElement container) continue;
+
+                    var c = container.TransformToAncestor(SessionList)
+                                     .Transform(new System.Windows.Point(container.ActualWidth / 2, container.ActualHeight / 2));
+                    double distance = Math.Abs((_isListLayout ? c.Y : c.X) - axis);
+                    if (distance < bestDistance)
+                    {
+                        bestDistance = distance;
+                        best = i;
+                    }
+                }
+                return best;
+            }
+            catch { return -1; }
         }
 
         private void AppIcon_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)

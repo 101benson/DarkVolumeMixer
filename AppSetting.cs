@@ -27,6 +27,10 @@ namespace DarkVolumeMixer
         // Kompakte Listenansicht (waagerechte Fader) statt senkrechter Kacheln
         public bool ListLayout { get; set; } = false;
 
+        // true = transparentes Fenster mit runden Ecken (sieht überall gleich aus, ruckelt aber beim Verschieben).
+        // false (Standard) = normales Fenster; unter Windows 11 mit runden Ecken vom System. Wirkt nach Neustart.
+        public bool TransparentWindow { get; set; } = false;
+
         // --- VERHALTEN ---
         public bool IsAlwaysOnTop { get; set; } = false;
     }

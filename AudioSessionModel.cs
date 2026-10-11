@@ -231,6 +231,9 @@ namespace DarkVolumeMixer
             DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastUserInteractionTicks) < InteractionGraceTicks;
 
         /// <summary>Pegel messen (~30x pro Sekunde, nur Speicher, keine UI-Zugriffe).</summary>
+        /// <summary>Aktuell gemessener Pegel dieser App (0..100, bereits auf Reglerstellung begrenzt).</summary>
+        public float LevelPercent => _rawPeak;
+
         public void PollPeak()
         {
             if (_isDisposed) return;

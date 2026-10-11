@@ -4,8 +4,8 @@
         xmlns:local="clr-namespace:DarkVolumeMixer"
         Title="{Binding SelectedDevice.FriendlyName, StringFormat='Dark Volume Mixer — {0}'}" 
         Height="Auto" MinHeight="380" MinWidth="380" MaxWidth="1920"
-        Background="Transparent" Foreground="#D0D0D0"
-        WindowStyle="None" AllowsTransparency="True"
+        Background="#0E0E10" Foreground="#D0D0D0"
+        WindowStyle="None"
         ShowInTaskbar="True" Topmost="{Binding IsAlwaysOnTop}"
         SizeToContent="Manual" ResizeMode="CanResize"
         Loaded="Window_Loaded" Closing="Window_Closing"
@@ -246,9 +246,7 @@
                                         PreviewMouseWheel="AppSlider_PreviewMouseWheel"
                                         MouseLeftButtonDown="AppCard_MouseLeftButtonDown"
                                         PreviewMouseLeftButtonUp="AppCard_PreviewMouseLeftButtonUp"
-                                        MouseMove="AppCard_MouseMove"
-                                        Drop="AppCard_Drop"
-                                        AllowDrop="True">
+                                        MouseMove="AppCard_MouseMove">
                                     
                                     <Border.Style>
                                         <Style TargetType="Border">
@@ -386,9 +384,7 @@
                     PreviewMouseWheel="AppSlider_PreviewMouseWheel"
                     MouseLeftButtonDown="AppCard_MouseLeftButtonDown"
                     PreviewMouseLeftButtonUp="AppCard_PreviewMouseLeftButtonUp"
-                    MouseMove="AppCard_MouseMove"
-                    Drop="AppCard_Drop"
-                    AllowDrop="True">
+                    MouseMove="AppCard_MouseMove">
                 <Border.Style>
                     <Style TargetType="Border">
                         <Setter Property="BorderBrush" Value="#252529"/>
@@ -443,7 +439,7 @@
 
     </Window.Resources>
 
-    <Border Background="#0E0E10" BorderBrush="#28282E" BorderThickness="1" CornerRadius="10" Padding="10,8,10,10"
+    <Border x:Name="RootBorder" Background="#0E0E10" BorderBrush="#28282E" BorderThickness="1" CornerRadius="10" Padding="10,8,10,10"
             MouseDown="Window_MouseDown">
         <Grid>
             <Grid.RowDefinitions>

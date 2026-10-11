@@ -28,6 +28,7 @@ namespace DarkVolumeMixer
             DiscordVolumeSlider.Value = s.DiscordVolumeValue;
             ProportionalMasterCheckBox.IsChecked = s.ProportionalMaster;
             ListLayoutCheckBox.IsChecked = s.ListLayout;
+            TransparentWindowCheckBox.IsChecked = s.TransparentWindow;
         }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
@@ -40,7 +41,16 @@ namespace DarkVolumeMixer
             s.ProportionalMaster = ProportionalMasterCheckBox.IsChecked ?? true;
             s.ListLayout = ListLayoutCheckBox.IsChecked ?? false;
 
+            bool transparentChanged = s.TransparentWindow != (TransparentWindowCheckBox.IsChecked ?? false);
+            s.TransparentWindow = TransparentWindowCheckBox.IsChecked ?? false;
+
             AppSettings.Save();
+
+            if (transparentChanged)
+            {
+                System.Windows.MessageBox.Show("Die Änderung am Fensterstil wird nach einem Neustart der App wirksam.",
+                    "Neustart nötig", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
 
             DialogResult = true;
             Close();
