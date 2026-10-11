@@ -1,7 +1,8 @@
 <Window x:Class="DarkVolumeMixer.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Einstellungen" Height="400" Width="400"
+        xmlns:local="clr-namespace:DarkVolumeMixer"
+        Title="Einstellungen" Height="450" Width="400"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Icon="app.ico">
@@ -36,30 +37,35 @@
             </Setter>
         </Style>
 
-        <!-- Custom Dark Horizontal Slider Style -->
-        <Style TargetType="Slider">
+        <!-- Custom Dark Horizontal Slider Style (Klick auf die Schiene springt direkt dorthin, siehe FaderSlider.cs) -->
+        <Style x:Key="SettingsSliderStyle" TargetType="local:FaderSlider">
+            <Setter Property="Focusable" Value="False"/>
             <Setter Property="Template">
                 <Setter.Value>
-                    <ControlTemplate TargetType="Slider">
-                        <Grid Height="24">
+                    <ControlTemplate TargetType="local:FaderSlider">
+                        <Grid Height="24" Background="Transparent">
                             <Border Height="4" Background="#1B1B1E" CornerRadius="2" VerticalAlignment="Center"/>
                             <Track x:Name="PART_Track">
                                 <Track.DecreaseRepeatButton>
-                                    <RepeatButton Background="Transparent" BorderThickness="0">
+                                    <RepeatButton Focusable="False" IsTabStop="False">
                                         <RepeatButton.Template>
-                                            <ControlTemplate TargetType="RepeatButton"><Grid Background="Transparent"/></ControlTemplate>
+                                            <ControlTemplate TargetType="RepeatButton">
+                                                <Grid Background="Transparent">
+                                                    <Border Height="4" CornerRadius="2" VerticalAlignment="Center" Background="#FF9500" Opacity="0.55"/>
+                                                </Grid>
+                                            </ControlTemplate>
                                         </RepeatButton.Template>
                                     </RepeatButton>
                                 </Track.DecreaseRepeatButton>
                                 <Track.IncreaseRepeatButton>
-                                    <RepeatButton Background="Transparent" BorderThickness="0">
+                                    <RepeatButton Focusable="False" IsTabStop="False">
                                         <RepeatButton.Template>
                                             <ControlTemplate TargetType="RepeatButton"><Grid Background="Transparent"/></ControlTemplate>
                                         </RepeatButton.Template>
                                     </RepeatButton>
                                 </Track.IncreaseRepeatButton>
                                 <Track.Thumb>
-                                    <Thumb Width="16" Height="16">
+                                    <Thumb Width="16" Height="16" Cursor="Hand">
                                         <Thumb.Template>
                                             <ControlTemplate TargetType="Thumb">
                                                 <Border Background="#2A2A2E" BorderBrush="#FF9500" BorderThickness="1.5" CornerRadius="8">
@@ -92,10 +98,20 @@
                           Fill="#FF9500" Width="16" Height="16" Stretch="Uniform" Margin="0,0,8,0"/>
                     <TextBlock Text="EINSTELLUNGEN" FontSize="11" FontWeight="Bold" Foreground="#88888C" VerticalAlignment="Center"/>
                 </StackPanel>
+                <TextBlock x:Name="VersionText" FontSize="11" Foreground="#555559" 
+                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
             </Grid>
 
             <!-- Inhalte / Optionen -->
             <StackPanel Grid.Row="1" VerticalAlignment="Center">
+                <!-- Ansicht: Liste statt Kacheln -->
+                <Border Background="#161619" BorderBrush="#252529" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,8">
+                    <CheckBox x:Name="ListLayoutCheckBox" 
+                              Content="Kompakte Listenansicht (waagerechte Regler)" 
+                              Foreground="#DDDDDD" FontSize="12" FontWeight="SemiBold"
+                              Cursor="Hand"/>
+                </Border>
+
                 <!-- Always on Top -->
                 <Border Background="#161619" BorderBrush="#252529" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,8">
                     <CheckBox x:Name="AlwaysOnTopCheckBox" 
@@ -136,7 +152,7 @@
                             <TextBlock Text="{Binding Value, ElementName=DiscordVolumeSlider, StringFormat={}{0:0}%}" 
                                        Foreground="#FF9500" FontWeight="Bold" FontSize="12" HorizontalAlignment="Right"/>
                         </Grid>
-                        <Slider x:Name="DiscordVolumeSlider" Minimum="0" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"/>
+                        <local:FaderSlider x:Name="DiscordVolumeSlider" Style="{StaticResource SettingsSliderStyle}" Minimum="0" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"/>
                     </StackPanel>
                 </Border>
             </StackPanel>

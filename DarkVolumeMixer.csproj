@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -8,6 +8,13 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <!-- Version: bei jedem Release hier hochzählen (und CHANGELOG.md / RELEASE_NOTES.md anpassen) -->
+    <Version>2.0.0</Version>
+    <Product>Dark Volume Mixer</Product>
+    <Authors>101benson</Authors>
+    <Copyright>Copyright (c) 2026 101benson</Copyright>
+    <Description>High-performance Windows audio mixer for individual app volumes.</Description>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,7 +24,6 @@
 
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.3.0" />
-    <PackageReference Include="System.Management" Version="10.0.10" />
   </ItemGroup>
 
 </Project>

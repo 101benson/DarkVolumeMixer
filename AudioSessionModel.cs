@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Windows.Media;
@@ -9,55 +10,80 @@ using NAudio.CoreAudioApi;
 
 namespace DarkVolumeMixer
 {
+    /// <summary>
+    /// Eine Kachel = eine App (kann mehrere Windows-Audiosessions bündeln).
+    /// Regeln dieser Klasse:
+    ///  - Geschrieben wird an Windows nur über CoalescingWriter (immer der neueste Wert, strikt nacheinander).
+    ///  - Von Windows gelesene Änderungen ("extern") werden nur vom ERSTEN Session-Eintrag übernommen;
+    ///    alle weiteren Sessions der Kachel werden an den Kartenwert angeglichen.
+    ///    (Früher haben sich mehrere Sessions mit unterschiedlicher Lautstärke gegenseitig überschrieben –
+    ///    das war das Springen zwischen z. B. 100 % und 90 %.)
+    /// </summary>
     public class AudioSessionModel : INotifyPropertyChanged, IDisposable
     {
-        private readonly object _sessionLock = new();
-        private readonly List<AudioSessionControl> _sessions = new();
+        private const float ExternalChangeTolerance = 0.6f;
+        private static readonly long InteractionGraceTicks = TimeSpan.FromMilliseconds(800).Ticks;
 
-        private string _name = string.Empty;
+        private readonly object _sessionLock = new();
+        private volatile AudioSessionControl[] _sessions = Array.Empty<AudioSessionControl>();
+
+        private readonly CoalescingWriter<float> _volumeWriter;
+        private readonly CoalescingWriter<bool> _muteWriter;
+
+        private string _name;
         private ImageSource? _icon;
-        private float _volume = 100f;
-        private bool _isMuted;
+        private volatile float _volume = 100f;
+        private volatile bool _isMuted;
         private float _peak;
         private bool _isPinned;
         private bool _isEnabled = true;
-        private bool _isDisposed;
+        private volatile bool _isDisposed;
+
+        // Was Windows nach unserem letzten Schreiben / Lesen für die erste Session hält
+        private volatile float _lastKnownDeviceVolume = 100f;
+        private volatile bool _lastKnownDeviceMute;
 
         private long _lastUserInteractionTicks;
-        private int _externalCheckCounter;
+        private int _adoptPending;
+        private volatile float _rawPeak;
 
-        public float RawCalculatedPeak;
         public Action? RequestMasterUnmute { get; set; }
+
+        /// <summary>
+        /// Wird ausgelöst, wenn sich Lautstärke/Mute unabhängig vom Master geändert hat
+        /// (Nutzer oder externe Änderung). Das Hauptfenster verwirft dann seine Proportional-Basis.
+        /// </summary>
+        public event Action? VolumeEdited;
 
         public AudioSessionModel(IEnumerable<AudioSessionControl> initialSessions, string name, ImageSource? icon)
         {
             _name = name;
             _icon = icon;
 
-            if (initialSessions != null)
+            _volumeWriter = new CoalescingWriter<float>(WriteVolume);
+            _muteWriter = new CoalescingWriter<bool>(WriteMute);
+
+            _sessions = initialSessions?.ToArray() ?? Array.Empty<AudioSessionControl>();
+
+            foreach (var session in _sessions)
             {
-                _sessions.AddRange(initialSessions);
-                if (_sessions.Count > 0)
+                try
                 {
-                    try
-                    {
-                        var sav = _sessions[0].SimpleAudioVolume;
-                        if (sav != null)
-                        {
-                            _volume = sav.Volume * 100f;
-                            _isMuted = sav.Mute;
-                            _isEnabled = !_isMuted;
-                        }
-                    }
-                    catch
-                    {
-                        _volume = 100f;
-                        _isMuted = false;
-                        _isEnabled = true;
-                    }
+                    var sav = session.SimpleAudioVolume;
+                    if (sav == null) continue;
+                    _volume = sav.Volume * 100f;
+                    _isMuted = sav.Mute;
+                    _isEnabled = !_isMuted;
+                    break;
                 }
+                catch { }
             }
+
+            _lastKnownDeviceVolume = _volume;
+            _lastKnownDeviceMute = _isMuted;
         }
+
+        // ---------------------------------------------------------------- Properties
 
         public string Name
         {
@@ -74,28 +100,30 @@ namespace DarkVolumeMixer
         public float Volume
         {
             get => _volume;
-            set
+            set => SetVolume(value, fromUser: true);
+        }
+
+        /// <summary>Setzt die Lautstärke "von innen" (z. B. durch den Master) – zählt nicht als Nutzeränderung.</summary>
+        public void SetVolumeProgrammatic(float value) => SetVolume(value, fromUser: false);
+
+        private void SetVolume(float value, bool fromUser)
+        {
+            float clamped = Math.Clamp(value, 0f, 100f);
+            if (Math.Abs(_volume - clamped) <= 0.05f) return;
+
+            _volume = clamped;
+            Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
+            OnPropertyChanged(nameof(Volume));
+
+            if (clamped > 0 && _isMuted) IsMuted = false;
+
+            if (fromUser)
             {
-                float clamped = Math.Clamp(value, 0f, 100f);
-                if (Math.Abs(_volume - clamped) > 0.05f)
-                {
-                    _volume = clamped;
-                    Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
-                    OnPropertyChanged();
-
-                    if (_volume > 0 && _isMuted)
-                    {
-                        IsMuted = false;
-                    }
-
-                    if (_volume > 0)
-                    {
-                        RequestMasterUnmute?.Invoke();
-                    }
-
-                    ApplyVolumeDirect(clamped / 100f);
-                }
+                if (clamped > 0) RequestMasterUnmute?.Invoke();
+                VolumeEdited?.Invoke();
             }
+
+            _volumeWriter.Post(clamped / 100f);
         }
 
         public bool IsMuted
@@ -103,19 +131,17 @@ namespace DarkVolumeMixer
             get => _isMuted;
             set
             {
-                if (_isMuted != value)
-                {
-                    _isMuted = value;
-                    IsEnabled = !value;
-                    Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
-                    OnPropertyChanged();
-                    ApplyMuteDirect(value);
+                if (_isMuted == value) return;
 
-                    if (!value)
-                    {
-                        RequestMasterUnmute?.Invoke();
-                    }
-                }
+                _isMuted = value;
+                IsEnabled = !value;
+                Interlocked.Exchange(ref _lastUserInteractionTicks, DateTime.UtcNow.Ticks);
+                OnPropertyChanged(nameof(IsMuted));
+
+                _muteWriter.Post(value);
+
+                if (!value) RequestMasterUnmute?.Invoke();
+                VolumeEdited?.Invoke();
             }
         }
 
@@ -124,7 +150,7 @@ namespace DarkVolumeMixer
             get => _peak;
             set
             {
-                if (Math.Abs(_peak - value) > 0.6f || (value == 0 && _peak != 0))
+                if (Math.Abs(_peak - value) > 1.0f || (value == 0f && _peak != 0f))
                 {
                     _peak = value;
                     OnPropertyChanged();
@@ -151,89 +177,179 @@ namespace DarkVolumeMixer
             set => SetField(ref _isEnabled, value);
         }
 
-        // Ersetzt alte Sessions sauber, statt sie endlos aufzustauen
+        // ---------------------------------------------------------------- Sessions
+
+        /// <summary>Ersetzt die Session-Liste durch den frischen Scan (alte werden nicht angesammelt).</summary>
         public void SyncSessions(IEnumerable<AudioSessionControl> newSessions)
         {
             if (_isDisposed) return;
+            var array = newSessions.ToArray();
+            lock (_sessionLock) { _sessions = array; }
+        }
 
+        private void RemoveSession(AudioSessionControl dead)
+        {
             lock (_sessionLock)
             {
-                _sessions.Clear();
-                _sessions.AddRange(newSessions);
+                _sessions = _sessions.Where(s => !ReferenceEquals(s, dead)).ToArray();
             }
         }
 
-        public void UpdateRawPeak()
+        // ---------------------------------------------------------------- Schreiben nach Windows
+
+        private void WriteVolume(float scalar)
+        {
+            foreach (var session in _sessions)
+            {
+                try
+                {
+                    var sav = session.SimpleAudioVolume;
+                    if (sav != null) sav.Volume = scalar;
+                }
+                catch { RemoveSession(session); }
+            }
+            _lastKnownDeviceVolume = scalar * 100f;
+        }
+
+        private void WriteMute(bool mute)
+        {
+            foreach (var session in _sessions)
+            {
+                try
+                {
+                    var sav = session.SimpleAudioVolume;
+                    if (sav != null) sav.Mute = mute;
+                }
+                catch { RemoveSession(session); }
+            }
+            _lastKnownDeviceMute = mute;
+        }
+
+        // ---------------------------------------------------------------- Lesen aus Windows (Hintergrund-Thread)
+
+        private bool IsUserInteracting() =>
+            DateTime.UtcNow.Ticks - Interlocked.Read(ref _lastUserInteractionTicks) < InteractionGraceTicks;
+
+        /// <summary>Pegel messen (~30x pro Sekunde, nur Speicher, keine UI-Zugriffe).</summary>
+        public void PollPeak()
         {
             if (_isDisposed) return;
 
-            _externalCheckCounter++;
-            bool shouldCheckExternal = (_externalCheckCounter % 15 == 0); // alle ~450ms prüfen
-
-            long lastInteraction = Interlocked.Read(ref _lastUserInteractionTicks);
-            bool isUserInteracting = (DateTime.UtcNow.Ticks - lastInteraction < TimeSpan.FromMilliseconds(800).Ticks);
-
-            float maxPeak = 0f;
-
-            lock (_sessionLock)
+            float volume = _volume;
+            if (_isMuted || volume <= 0.01f)
             {
-                for (int i = _sessions.Count - 1; i >= 0; i--)
-                {
-                    try
-                    {
-                        var session = _sessions[i];
-
-                        if (shouldCheckExternal && !isUserInteracting)
-                        {
-                            var sav = session.SimpleAudioVolume;
-                            if (sav != null)
-                            {
-                                bool currentMute = sav.Mute;
-                                float currentVol = sav.Volume * 100f;
-
-                                if (_isMuted != currentMute)
-                                {
-                                    _isMuted = currentMute;
-                                    _isEnabled = !currentMute;
-                                    DispatcherRun(() =>
-                                    {
-                                        OnPropertyChanged(nameof(IsMuted));
-                                        OnPropertyChanged(nameof(IsEnabled));
-                                    });
-                                }
-
-                                if (Math.Abs(_volume - currentVol) > 1.5f)
-                                {
-                                    _volume = currentVol;
-                                    DispatcherRun(() => OnPropertyChanged(nameof(Volume)));
-                                }
-                            }
-                        }
-
-                        if (!_isMuted && _volume > 0.01f)
-                        {
-                            var meter = session.AudioMeterInformation;
-                            if (meter != null)
-                            {
-                                float rawVal = meter.MasterPeakValue * 100f;
-                                float scaledPeak = rawVal * (_volume / 100f);
-                                if (scaledPeak > maxPeak) maxPeak = scaledPeak;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        _sessions.RemoveAt(i);
-                    }
-                }
+                _rawPeak = 0f;
+                return;
             }
 
-            RawCalculatedPeak = (_isMuted || _volume <= 0.01f) ? 0f : Math.Min(maxPeak, _volume);
+            float max = 0f;
+            foreach (var session in _sessions)
+            {
+                try
+                {
+                    var meter = session.AudioMeterInformation;
+                    if (meter == null) continue;
+                    float p = meter.MasterPeakValue;
+                    if (p > max) max = p;
+                }
+                catch { RemoveSession(session); }
+            }
+
+            // Balken reicht nie höher als der Regler: Signalstärke (0..100 %) x Reglerstellung
+            _rawPeak = MeterMath.ToPercent(max) * volume / 100f;
         }
 
+        /// <summary>Prüft, ob Windows/die App Lautstärke oder Mute selbst geändert hat (~2x pro Sekunde).</summary>
+        public void PollExternalState()
+        {
+            if (_isDisposed) return;
+
+            var snapshot = _sessions;
+            if (snapshot.Length == 0) return;
+            if (_volumeWriter.IsBusy || _muteWriter.IsBusy || IsUserInteracting()) return;
+
+            // Erste lesbare Session = maßgeblich
+            int primaryIndex = -1;
+            float curVol = 0f;
+            bool curMute = false;
+
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try
+                {
+                    var sav = snapshot[i].SimpleAudioVolume;
+                    if (sav == null) continue;
+                    curVol = sav.Volume * 100f;
+                    curMute = sav.Mute;
+                    primaryIndex = i;
+                    break;
+                }
+                catch { RemoveSession(snapshot[i]); }
+            }
+
+            if (primaryIndex < 0) return;
+
+            bool volChanged = Math.Abs(curVol - _lastKnownDeviceVolume) > ExternalChangeTolerance;
+            bool muteChanged = curMute != _lastKnownDeviceMute;
+
+            if (volChanged || muteChanged)
+            {
+                // Übernahme passiert im UI-Thread, damit sie sich nie mit Slider-Eingaben überschneidet.
+                if (Interlocked.Exchange(ref _adoptPending, 1) == 0)
+                {
+                    PostToUi(() => AdoptExternalState(curVol, curMute));
+                }
+                return;
+            }
+
+            // Keine externe Änderung: weitere Sessions der Kachel an den Kartenwert angleichen.
+            for (int i = primaryIndex + 1; i < snapshot.Length; i++)
+            {
+                try
+                {
+                    var sav = snapshot[i].SimpleAudioVolume;
+                    if (sav == null) continue;
+                    if (Math.Abs(sav.Volume * 100f - _volume) > ExternalChangeTolerance) sav.Volume = _volume / 100f;
+                    if (sav.Mute != _isMuted) sav.Mute = _isMuted;
+                }
+                catch { RemoveSession(snapshot[i]); }
+            }
+        }
+
+        // ---------------------------------------------------------------- UI-Thread
+
+        private void AdoptExternalState(float vol, bool mute)
+        {
+            Interlocked.Exchange(ref _adoptPending, 0);
+
+            if (_isDisposed || IsUserInteracting() || _volumeWriter.IsBusy || _muteWriter.IsBusy) return;
+
+            bool changed = false;
+
+            if (Math.Abs(vol - _volume) > ExternalChangeTolerance)
+            {
+                _volume = vol;
+                OnPropertyChanged(nameof(Volume));
+                changed = true;
+            }
+            _lastKnownDeviceVolume = vol;
+
+            if (mute != _isMuted)
+            {
+                _isMuted = mute;
+                IsEnabled = !mute;
+                OnPropertyChanged(nameof(IsMuted));
+                changed = true;
+            }
+            _lastKnownDeviceMute = mute;
+
+            if (changed) VolumeEdited?.Invoke();
+        }
+
+        /// <summary>Glättet den Pegel für die Anzeige (UI-Thread, pro Frame).</summary>
         public void RenderTickPeak()
         {
-            float target = RawCalculatedPeak;
+            float target = _rawPeak;
             if (target >= _peak)
             {
                 Peak = target;
@@ -244,66 +360,28 @@ namespace DarkVolumeMixer
             }
         }
 
-        private void ApplyVolumeDirect(float volScalar)
+        private static void PostToUi(Action action)
         {
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                lock (_sessionLock)
-                {
-                    for (int i = _sessions.Count - 1; i >= 0; i--)
-                    {
-                        try
-                        {
-                            var sav = _sessions[i].SimpleAudioVolume;
-                            if (sav != null) sav.Volume = volScalar;
-                        }
-                        catch { _sessions.RemoveAt(i); }
-                    }
-                }
-            });
+            var dispatcher = System.Windows.Application.Current?.Dispatcher;
+            if (dispatcher == null) return;
+
+            if (dispatcher.CheckAccess()) action();
+            else dispatcher.BeginInvoke(DispatcherPriority.Background, action);
         }
 
-        private void ApplyMuteDirect(bool mute)
-        {
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                lock (_sessionLock)
-                {
-                    for (int i = _sessions.Count - 1; i >= 0; i--)
-                    {
-                        try
-                        {
-                            var sav = _sessions[i].SimpleAudioVolume;
-                            if (sav != null) sav.Mute = mute;
-                        }
-                        catch { _sessions.RemoveAt(i); }
-                    }
-                }
-            });
-        }
-
-        private static void DispatcherRun(Action action)
-        {
-            var app = System.Windows.Application.Current;
-            if (app?.Dispatcher != null && !app.Dispatcher.CheckAccess())
-            {
-                app.Dispatcher.BeginInvoke(action, DispatcherPriority.Background);
-            }
-            else
-            {
-                action();
-            }
-        }
+        // ---------------------------------------------------------------- Aufräumen / INPC
 
         public void Dispose()
         {
             if (_isDisposed) return;
             _isDisposed = true;
-            lock (_sessionLock) { _sessions.Clear(); }
+            lock (_sessionLock) { _sessions = Array.Empty<AudioSessionControl>(); }
             RequestMasterUnmute = null;
+            VolumeEdited = null;
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
+
         protected void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 

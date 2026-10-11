@@ -1,3 +1,4 @@
+using System;
 using System.Windows;
 using System.Windows.Input;
 
@@ -8,29 +9,36 @@ namespace DarkVolumeMixer
         public SettingsWindow()
         {
             InitializeComponent();
-            LoadTemporarySettings();
+            ShowVersion();
+            LoadSettings();
         }
 
-        private void LoadTemporarySettings()
+        private void ShowVersion()
         {
-            AlwaysOnTopCheckBox.IsChecked = AppSettings.Current.IsAlwaysOnTop;
-            AutoAdjustWidthCheckBox.IsChecked = AppSettings.Current.AutoAdjustWidth;
-            DiscordLimiterCheckBox.IsChecked = AppSettings.Current.AutoVolumeDiscord;
-            DiscordVolumeSlider.Value = AppSettings.Current.DiscordVolumeValue;
-            
-            // NEU: Laden
-            ProportionalMasterCheckBox.IsChecked = AppSettings.Current.ProportionalMaster;
+            var v = typeof(SettingsWindow).Assembly.GetName().Version;
+            if (v != null) VersionText.Text = $"v{v.Major}.{v.Minor}.{v.Build}";
+        }
+
+        private void LoadSettings()
+        {
+            var s = AppSettings.Current;
+            AlwaysOnTopCheckBox.IsChecked = s.IsAlwaysOnTop;
+            AutoAdjustWidthCheckBox.IsChecked = s.AutoAdjustWidth;
+            DiscordLimiterCheckBox.IsChecked = s.AutoVolumeDiscord;
+            DiscordVolumeSlider.Value = s.DiscordVolumeValue;
+            ProportionalMasterCheckBox.IsChecked = s.ProportionalMaster;
+            ListLayoutCheckBox.IsChecked = s.ListLayout;
         }
 
         private void SaveButton_Click(object sender, RoutedEventArgs e)
         {
-            AppSettings.Current.IsAlwaysOnTop = AlwaysOnTopCheckBox.IsChecked ?? false;
-            AppSettings.Current.AutoAdjustWidth = AutoAdjustWidthCheckBox.IsChecked ?? true;
-            AppSettings.Current.AutoVolumeDiscord = DiscordLimiterCheckBox.IsChecked ?? true;
-            AppSettings.Current.DiscordVolumeValue = (float)DiscordVolumeSlider.Value;
-            
-            // NEU: Speichern
-            AppSettings.Current.ProportionalMaster = ProportionalMasterCheckBox.IsChecked ?? true;
+            var s = AppSettings.Current;
+            s.IsAlwaysOnTop = AlwaysOnTopCheckBox.IsChecked ?? false;
+            s.AutoAdjustWidth = AutoAdjustWidthCheckBox.IsChecked ?? true;
+            s.AutoVolumeDiscord = DiscordLimiterCheckBox.IsChecked ?? true;
+            s.DiscordVolumeValue = (float)DiscordVolumeSlider.Value;
+            s.ProportionalMaster = ProportionalMasterCheckBox.IsChecked ?? true;
+            s.ListLayout = ListLayoutCheckBox.IsChecked ?? false;
 
             AppSettings.Save();
 
@@ -46,10 +54,8 @@ namespace DarkVolumeMixer
 
         private void Border_MouseDown(object sender, MouseButtonEventArgs e)
         {
-            if (e.ChangedButton == MouseButton.Left)
-            {
-                DragMove();
-            }
+            if (e.ChangedButton != MouseButton.Left) return;
+            try { DragMove(); } catch (InvalidOperationException) { }
         }
     }
 }
